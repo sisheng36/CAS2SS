@@ -1,6 +1,6 @@
 name: Build and Push Docker Image to GitHub Packages
 
-# 全局环境变量（作用于整个工作流，包括所有 Action）
+# 全局环境变量：强制 Action 用 Node.js 24
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -20,19 +20,17 @@ jobs:
       packages: write
       contents: read
     steps:
-      # 升级到最新版：actions/checkout@v4.2.0（完全适配 Node24）
       - name: Checkout code
         uses: actions/checkout@v4.2.0
       
-# 其他部分与方案一相同，仅修改以下 Action 版本：
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3.12.0  # 或升级到 v4（Node24 原生支持）
+        uses: docker/setup-buildx-action@v3.12.0
       
       - name: Login to GitHub Packages
-        uses: docker/login-action@v4.0.1  # v4 已默认使用 Node24
+        uses: docker/login-action@v4.0.0  # v4 唯一正式版
       
       - name: Build and push
-        uses: docker/build-push-action@v7.0.0  # 最新主版本，Node24 原生支持
+        uses: docker/build-push-action@v5.3.0  # v5 系列最新稳定版（真实存在）
         with:
           context: .
           push: true
