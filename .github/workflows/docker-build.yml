@@ -7,29 +7,39 @@ on:
       - 'cas2ss.js'
       - 'package.json'
       - 'Dockerfile'
+  workflow_dispatch:  # 允许手动触发
+
+env:
+  # 核心修复：强制使用 Node.js 24 运行 Actions
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
+        uses: actions/checkout@v4  # 保持最新版，已兼容 Node.js 24
+      
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
+        uses: docker/setup-buildx-action@v3  # 已兼容 Node.js 24
+      
       - name: Login to GitHub Packages
-        uses: docker/login-action@v3
+        uses: docker/login-action@v3  # 已兼容 Node.js 24
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
+      
       - name: Build and push
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v5  # 已兼容 Node.js 24
         with:
           context: .
           push: true
+          no-cache: true
+          platforms: linux/amd64
           tags: |
-            ghcr.io/${{ github.repository_owner }}/cas2ss:latest
-            ghcr.io/${{ github.repository_owner }}/cas2ss:v1
+            ghcr.io/sisheng36/cas2ss:latest
+            ghcr.io/sisheng36/cas2ss:v1
