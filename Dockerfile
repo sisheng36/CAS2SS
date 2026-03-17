@@ -9,7 +9,7 @@ FROM node:18-alpine
 WORKDIR /app
 # 复制构建阶段的依赖和脚本
 COPY --from=builder /app/node_modules ./node_modules
-COPY strm-push.js ./
+COPY cas2ss.js ./
 # 创建数据目录（持久化任务ID）
 RUN mkdir -p /app/data
 # 启动脚本
