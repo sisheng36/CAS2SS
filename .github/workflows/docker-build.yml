@@ -31,5 +31,5 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/strm-push:latest
-            ghcr.io/${{ github.repository_owner }}/strm-push:v1
+            ghcr.io/${{ github.repository_owner }}/cas2ss:latest
+            ghcr.io/${{ github.repository_owner }}/cas2ss:v1
