@@ -1,1 +1,3 @@
 # CAS2SS
+本项目在豆包AI指导下完成
+因cloud_auto_save作者已不再更新基础项目，为解决自动化问题，此项目使用cloud189_auto_save的api，将转存任务的消息消息通过webhook推送至smartstrm，用以自动生成strm链接。
