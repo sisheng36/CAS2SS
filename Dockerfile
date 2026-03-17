@@ -14,3 +14,4 @@ COPY cas2ss.js ./
 RUN mkdir -p /app/data
 # 启动脚本
 CMD ["npm", "start"]
+
