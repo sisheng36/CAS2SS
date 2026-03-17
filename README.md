@@ -3,7 +3,7 @@
 
 因cloud_auto_save作者已不再更新基础项目，为解决自动化问题，此项目使用cloud189_auto_save的api，将转存任务的消息消息通过webhook推送至smartstrm，用以自动生成strm链接。
 # 拉取镜像
-docker pull ghcr.io/sisheng36/cas2ss:latest
+docker pull sisheng36/cas2ss:latest
 # 运行容器
 docker run -d \
   --name cas2ss-container \
@@ -23,4 +23,4 @@ docker run -d \
   -e DELAY="10" \#延迟刮削10秒
   
   --restart=always \
-  ghcr.io/sisheng36/cas2ss:latest
+  sisheng36/cas2ss:latest
