@@ -13,4 +13,4 @@ COPY cas2ss.js ./
 # 创建数据目录（持久化任务ID）
 RUN mkdir -p /app/data
 # 启动脚本
-CMD ["npm", "start"]
+CMD ["node", "strm-push.js"]
