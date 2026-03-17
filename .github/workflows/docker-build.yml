@@ -4,7 +4,7 @@ on:
   push:
     branches: [ main ]
     paths:
-      - 'strm-push.js'
+      - 'cas2ss.js'
       - 'package.json'
       - 'Dockerfile'
 
