@@ -28,7 +28,7 @@ function getShanghaiTime() {
   return new Intl.DateTimeFormat('zh-CN', options).format(new Date()).replace(/\//g, '-');
 }
 
-// ===== 路径截取（不变）=====
+// ===== 路径截取（完全不变）=====
 function extractTargetPath(realFolderName, resourceName) {
   if (!realFolderName || !resourceName) return '';
   const cleanPath = realFolderName.trim().replace(/\/+/g, '/').replace(/^\/|\/$/g, '').toLowerCase();
@@ -41,7 +41,7 @@ function extractTargetPath(realFolderName, resourceName) {
   return targetParts.length > 0 ? `/${targetParts.join('/')}` : '';
 }
 
-// ===== 持久化：存储 { taskId: lastFileUpdateTime } =====
+// ===== 持久化：存储 { [task.id]: lastFileUpdateTime } =====
 function initSentTaskRecords() {
   try {
     const dataDir = path.dirname(CONFIG.persistFile);
@@ -69,9 +69,9 @@ function saveSentTaskRecords(records) {
 
 let sentTaskRecords = initSentTaskRecords();
 
-// ===== 1分钟仅打印一次无任务日志 =====
-let lastNoTaskLog = 0;
-const LOG_INTERVAL = 60 * 1000;
+// ===== 1分钟只打一次无任务日志 =====
+let lastNoTaskLogAt = 0;
+const NO_TASK_LOG_INTERVAL = 60 * 1000;
 
 // ===== 环境检查（不变）=====
 function checkRequiredEnv() {
@@ -101,29 +101,28 @@ async function runPolling() {
 
     if (!res.data?.success || !Array.isArray(res.data.data)) {
       const now = Date.now();
-      if (now - lastNoTaskLog >= LOG_INTERVAL) {
+      if (now - lastNoTaskLogAt >= NO_TASK_LOG_INTERVAL) {
         console.log(`[${getShanghaiTime()}] API无有效数据`);
-        lastNoTaskLog = now;
+        lastNoTaskLogAt = now;
       }
       return;
     }
 
-    const tasks = res.data.data.filter(t => 
-      t.status === CONFIG.filterStatus && 
-      t.realFolderName && 
-      t.lastFileUpdateTime
+    const tasks = res.data.data.filter(task =>
+      task.status === CONFIG.filterStatus &&
+      task.realFolderName
     );
 
     if (tasks.length === 0) {
       const now = Date.now();
-      if (now - lastNoTaskLog >= LOG_INTERVAL) {
+      if (now - lastNoTaskLogAt >= NO_TASK_LOG_INTERVAL) {
         console.log(`[${getShanghaiTime()}] ⏳ 暂无新任务`);
-        lastNoTaskLog = now;
+        lastNoTaskLogAt = now;
       }
       return;
     }
 
-    lastNoTaskLog = 0;
+    lastNoTaskLogAt = 0;
 
     for (const task of tasks) {
       const targetPath = extractTargetPath(task.realFolderName, task.resourceName);
@@ -133,34 +132,37 @@ async function runPolling() {
         continue;
       }
 
-      // ✅ 核心：只有 从未推送过 或 文件更新时间改变 才推送
       const oldTime = sentTaskRecords[task.id];
-      if (oldTime && oldTime === task.lastFileUpdateTime) {
-        continue; // 无更新，直接跳过，不打印任何日志
+      const newTime = task.lastFileUpdateTime;
+
+      // ——🔥 核心：id存在 && 时间没变 → 彻底静默跳过
+      if (oldTime !== undefined && oldTime === newTime) {
+        continue;
       }
 
-      // 推送
+      // ——🔥 只有：第一次 / 时间变了 才推送
       const pushData = {
         strmtask: CONFIG.strmTasks.join(','),
         event: 'cs_strm',
         savepath: targetPath,
         delay: CONFIG.delay
       };
-      await axios.post(CONFIG.targetWebhook, pushData);
 
-      // 保存本次更新时间
-      sentTaskRecords[task.id] = task.lastFileUpdateTime;
+      await axios.post(CONFIG.targetWebhook, pushData, {
+        headers: { 'Content-Type': 'application/json; charset=utf-8' }
+      });
+
+      // 记录这次的时间
+      sentTaskRecords[task.id] = newTime;
       saveSentTaskRecords(sentTaskRecords);
 
-      // 日志
-      const type = oldTime ? '更新' : '首次';
+      const type = oldTime === undefined ? '首次' : '更新';
       console.log(`[${getShanghaiTime()}] ✅ ${type}推送成功
 ├─ 任务ID：${task.id}
 ├─ 原始路径：${task.realFolderName}
 ├─ 资源名称：${task.resourceName}
 ├─ 推送路径：${targetPath}
-├─ 延迟时间：${CONFIG.delay}秒
-├─ 文件更新时间：${task.lastFileUpdateTime}`);
+├─ 延迟时间：${CONFIG.delay}秒`);
     }
 
   } catch (error) {
@@ -174,7 +176,7 @@ checkRequiredEnv();
 console.log(`[${getShanghaiTime()}] 🚀 脚本启动成功
 ├─ 轮询间隔：${CONFIG.pollInterval}秒
 ├─ 推送延迟：${CONFIG.delay}秒
-├─ 重启不重复推送｜文件更新自动重推`);
+├─ 已兼容 lastFileUpdateTime = null`);
 runPolling();
 setInterval(runPolling, CONFIG.pollInterval * 1000);
 
