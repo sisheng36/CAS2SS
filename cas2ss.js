@@ -13,7 +13,6 @@ const CONFIG = {
   persistFile: path.join(__dirname, 'data/sent-tasks.json')
 };
 
-// ===== 新增：获取上海时间格式化字符串 =====
 function getShanghaiTime() {
   const options = {
     timeZone: 'Asia/Shanghai',
