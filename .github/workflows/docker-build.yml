@@ -43,4 +43,4 @@ jobs:
           platforms: linux/amd64
           tags: |
             ghcr.io/sisheng36/cas2ss:latest
-            ghcr.io/sisheng36/cas2ss:v1
+            ghcr.io/sisheng36/cas2ss:v1.2.2
