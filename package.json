@@ -1,6 +1,6 @@
 {
   "name": "cas2ss",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Cloud189 auto push strm task via webhook",
   "main": "cas2ss.js",
   "dependencies": {
