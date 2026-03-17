@@ -9,11 +9,18 @@ docker run -d \
   --name cas2ss-container \
   -v /宿主机路径:/app/data \
   -e PROJECT_API="你的API地址" \#cas的api地址，如http://127.0.0.1:3000/api/tasks
+  
   -e API_KEY="你的API密钥" \#cas里生成的api密钥
+  
   -e TARGET_WEBHOOK="你的Webhook地址" \#ss的webhook地址，如http://127.0.0.1:8024/webhook/**********
+  
   -e POLL_INTERVAL="15" \#每15秒监听一次
+  
   -e STRM_TASKS="国产剧1,国产剧2,国产剧3" \#任务名之间用英文逗号连接
+  
   -e FILTER_STATUS="processing" \#追剧中
+  
   -e DELAY="10" \#延迟刮削10秒
+  
   --restart=always \
   ghcr.io/sisheng36/cas2ss:latest
