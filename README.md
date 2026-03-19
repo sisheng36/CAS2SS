@@ -20,7 +20,5 @@ docker run -d \
   
   -e FILTER_STATUS="processing" \#追剧中
   
-  -e DELAY="10" \#延迟刮削10秒
-  
   --restart=always \
   sisheng36/cas2ss:latest
