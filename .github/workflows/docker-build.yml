@@ -40,7 +40,7 @@ jobs:
           push: true  # 自动推送到Docker Hub
           # 给镜像打标签：latest（通用）+ 架构专属标签（可选）
           tags: |
-            ${{ secrets.DOCKER_HUB_USERNAME }}/cas2ss:v1.2.9
+            ${{ secrets.DOCKER_HUB_USERNAME }}/cas2ss:v2.0.0
             ${{ secrets.DOCKER_HUB_USERNAME }}/cas2ss:latest
             
       - name: Update Docker Hub Description
