@@ -2,7 +2,6 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 
-// ===== 配置：简化为自动判断延迟，无需路径映射 =====
 const CONFIG = {
   projectApi: process.env.PROJECT_API,
   apiKey: process.env.API_KEY,
