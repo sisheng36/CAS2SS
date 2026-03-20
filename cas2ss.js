@@ -12,10 +12,9 @@ const CONFIG = {
   persistFile: path.join(__dirname, 'data/sent-tasks.json'),
   logsApi: process.env.LOGS_API || process.env.PROJECT_API?.replace('/api/tasks', '/api/logs/events'),
   dedupeWindow: 60 * 1000 // 1分钟去重窗口期
-  // ===== 已删除：delay配置 =====
 };
 
-// ===== 上海时间（不变）=====
+// ===== 上海时间 =====
 function getShanghaiTime() {
   const options = {
     timeZone: 'Asia/Shanghai',
@@ -70,14 +69,14 @@ function saveSentTaskRecords(records) {
 }
 
 let sentTaskRecords = initSentTaskRecords();
-let pendingRenameTasks = new Map();
-let delayedPushCache = new Map();
+let pendingRenameTasks = new Map(); // 待重命名任务队列
+let delayedPushCache = new Map();   // 延迟推送缓存（按targetPath分组）
 
-// ===== 日志频率控制（不变）=====
+// ===== 日志频率控制 =====
 let lastNoTaskLogAt = 0;
 const NO_TASK_LOG_INTERVAL = 60 * 1000;
 
-// ===== 环境检查（已删除DELAY检查）=====
+// ===== 环境检查 =====
 function checkRequiredEnv() {
   const required = [
     { key: 'PROJECT_API', value: CONFIG.projectApi },
@@ -86,7 +85,6 @@ function checkRequiredEnv() {
     { key: 'STRM_TASKS', value: CONFIG.strmTasks },
     { key: 'FILTER_STATUS', value: CONFIG.filterStatus },
     { key: 'POLL_INTERVAL', value: CONFIG.pollInterval }
-    // ===== 已删除：DELAY环境变量检查 =====
   ];
   const missing = required.filter(item => !item.value);
   if (missing.length > 0) {
@@ -96,7 +94,7 @@ function checkRequiredEnv() {
   }
 }
 
-// ===== 步骤1：轮询tasks（不变，仅删除delay相关日志）=====
+// ===== 步骤1：轮询tasks，发现新/更新任务 → 加入待重命名队列 =====
 async function pollTasks() {
   try {
     const res = await axios.get(CONFIG.projectApi, {
@@ -153,7 +151,6 @@ async function pollTasks() {
 ├─ 任务ID：${task.id}
 ├─ 资源名称：${task.resourceName}
 ├─ 截取路径：${targetPath}`);
-        // ===== 已删除：延迟时间相关日志 =====
       }
     }
 
@@ -162,14 +159,13 @@ async function pollTasks() {
   }
 }
 
-// ===== 推送函数（已删除delay字段）=====
+// ===== 推送函数 =====
 async function doPush(task) {
   try {
     const pushData = {
       strmtask: CONFIG.strmTasks.join(','),
       event: 'cs_strm',
       savepath: task.targetPath
-      // ===== 已删除：delay字段 =====
     };
 
     await axios.post(CONFIG.targetWebhook, pushData, {
@@ -184,13 +180,12 @@ async function doPush(task) {
 ├─ 原始路径：${task.realFolderName}
 ├─ 资源名称：${task.resourceName}
 ├─ 推送路径：${task.targetPath}`);
-    // ===== 已删除：延迟时间日志 =====
   } catch (error) {
     console.error(`[${getShanghaiTime()}] ❌ 推送失败:`, error.message);
   }
 }
 
-// ===== 步骤2：轮询Logs+去重（不变）=====
+// ===== 步骤2：轮询Logs，双重验证任务执行完成+重命名完成 → 延迟推送 =====
 async function pollLogsAndPush() {
   try {
     if (pendingRenameTasks.size === 0) return;
@@ -201,42 +196,57 @@ async function pollLogsAndPush() {
     if (!res.data) return;
 
     const logText = Array.isArray(res.data) ? res.data.join('') : res.data.toString();
-    const isGlobalRenameDone = logText.includes('自动重命名完成');
-    if (!isGlobalRenameDone) return;
 
-    const taskNameReg = /任务\[([^\]]+)\]/g;
-    const logTaskNames = new Set();
-    let match;
-    while ((match = taskNameReg.exec(logText)) !== null) {
-      logTaskNames.add(match[1].trim());
+    // 提取「任务[xxx]执行完成」的任务名
+    const executedTaskReg = /任务\[([^\]]+)\]执行完成/g;
+    const executedTasks = new Set();
+    let execMatch;
+    while ((execMatch = executedTaskReg.exec(logText)) !== null) {
+      executedTasks.add(execMatch[1].trim());
     }
 
+    // 提取「xxx自动重命名完成」的资源名
+    const renameDoneReg = /(.+?)自动重命名完成/g;
+    const renamedTasks = new Set();
+    let renameMatch;
+    while ((renameMatch = renameDoneReg.exec(logText)) !== null) {
+      renamedTasks.add(renameMatch[1].trim());
+    }
+
+    // 遍历待重命名队列，双重验证
     for (const [taskId, task] of pendingRenameTasks.entries()) {
-      const taskMatchName = task.resourceName.trim().replace(/\(根\)/g, '');
-      const isTaskRenameDone = Array.from(logTaskNames).some(logName => 
-        logName.includes(taskMatchName) || taskMatchName.includes(logName)
+      const taskFullName = task.resourceName.trim().replace(/\(根\)/g, '');
+
+      // 条件1：任务已执行完成
+      const isTaskExecuted = Array.from(executedTasks).some(execName =>
+        execName.includes(taskFullName) || taskFullName.includes(execName.replace(/\/Season \d+/, ''))
       );
 
-      if (isTaskRenameDone) {
+      // 条件2：自动重命名完成
+      const isRenameDone = Array.from(renamedTasks).some(renameName =>
+        renameName.includes(taskFullName) || taskFullName.includes(renameName)
+      );
+
+      // 双重验证通过 → 进入延迟推送
+      if (isTaskExecuted && isRenameDone) {
         const targetPath = task.targetPath;
 
+        // 同路径：清除旧定时器，覆盖为最后一个任务
         if (delayedPushCache.has(targetPath)) {
           const oldCache = delayedPushCache.get(targetPath);
           clearTimeout(oldCache.timer);
           console.log(`[${getShanghaiTime()}] ⏳ 路径${targetPath}已有待推送任务，更新为最后一次（任务ID：${taskId}）`);
         }
 
+        // 设置新的1分钟定时器
         const timer = setTimeout(() => {
           doPush(task);
           delayedPushCache.delete(targetPath);
           pendingRenameTasks.delete(taskId);
         }, CONFIG.dedupeWindow);
 
-        delayedPushCache.set(targetPath, {
-          task: task,
-          timer: timer
-        });
-
+        // 存入缓存
+        delayedPushCache.set(targetPath, { task, timer });
         pendingRenameTasks.delete(taskId);
       }
     }
@@ -246,13 +256,13 @@ async function pollLogsAndPush() {
   }
 }
 
-// ===== 合并轮询（不变）=====
+// ===== 合并轮询 =====
 async function runPolling() {
   await pollTasks();
   await pollLogsAndPush();
 }
 
-// ===== 启动（已删除日志API+delay相关打印）=====
+// ===== 启动 =====
 checkRequiredEnv();
 console.log(`[${getShanghaiTime()}] 🚀 脚本启动成功
 ├─ 轮询间隔：${CONFIG.pollInterval}秒
@@ -261,7 +271,7 @@ console.log(`[${getShanghaiTime()}] 🚀 脚本启动成功
 runPolling();
 setInterval(runPolling, CONFIG.pollInterval * 1000);
 
-// ===== 停止（不变）=====
+// ===== 停止（清理定时器）=====
 process.on('SIGINT', () => {
   for (const [_, cache] of delayedPushCache) {
     clearTimeout(cache.timer);
