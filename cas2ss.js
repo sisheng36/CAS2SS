@@ -12,8 +12,13 @@ const CONFIG = {
   persistFile: path.join(__dirname, 'data/sent-tasks.json')
 };
 
-const TIME_WINDOW_SECONDS = 120;
+// 固定延迟规则：电影结尾15s，其他90s
+const DELAY_RULE = {
+  movie: 15,
+  other: 90
+};
 
+// ===== 上海时间 =====
 function getShanghaiTime() {
   const options = {
     timeZone: 'Asia/Shanghai',
@@ -28,6 +33,7 @@ function getShanghaiTime() {
   return new Intl.DateTimeFormat('zh-CN', options).format(new Date()).replace(/\//g, '-');
 }
 
+// ===== 路径截取（完全不变）=====
 function extractTargetPath(realFolderName, resourceName) {
   if (!realFolderName || !resourceName) return '';
   const cleanPath = realFolderName.trim().replace(/\/+/g, '/').replace(/^\/|\/$/g, '').toLowerCase();
@@ -40,6 +46,7 @@ function extractTargetPath(realFolderName, resourceName) {
   return targetParts.length > 0 ? `/${targetParts.join('/')}` : '';
 }
 
+// ===== 持久化：存储 { [task.id]: lastFileUpdateTime } =====
 function initSentTaskRecords() {
   try {
     const dataDir = path.dirname(CONFIG.persistFile);
@@ -60,7 +67,7 @@ function initSentTaskRecords() {
 
 function saveSentTaskRecords(records) {
   try {
-    fs.writeFileSync(CONFIG.persistFile, JSON.stringify(records, null, 2), 'utf8');
+    fs.writeFileSync(CONFIG.persistFile, JSON.stringify(records), 'utf8');
   } catch (error) {
     console.error(`[${getShanghaiTime()}] ❌ 保存任务记录失败:`, error.message);
   }
@@ -68,9 +75,11 @@ function saveSentTaskRecords(records) {
 
 let sentTaskRecords = initSentTaskRecords();
 
+// ===== 1分钟只打一次无任务日志 =====
 let lastNoTaskLogAt = 0;
 const NO_TASK_LOG_INTERVAL = 60 * 1000;
 
+// ===== 环境检查 =====
 function checkRequiredEnv() {
   const required = [
     { key: 'PROJECT_API', value: CONFIG.projectApi },
@@ -88,189 +97,7 @@ function checkRequiredEnv() {
   }
 }
 
-const waitingQueue = new Map();
-
-function chainGroupTasks(tasks) {
-  const sorted = [...tasks].sort((a, b) => 
-    new Date(a.lastCheckTime) - new Date(b.lastCheckTime)
-  );
-  
-  const groups = [];
-  for (const task of sorted) {
-    const checkTime = new Date(task.lastCheckTime).getTime();
-    
-    if (groups.length > 0) {
-      const lastGroup = groups[groups.length - 1];
-      const lastTask = lastGroup.tasks[lastGroup.tasks.length - 1];
-      const lastCheckTime = new Date(lastTask.lastCheckTime).getTime();
-      const timeDiff = checkTime - lastCheckTime;
-      
-      if (timeDiff < TIME_WINDOW_SECONDS * 1000) {
-        lastGroup.tasks.push(task);
-        lastGroup.lastCheckTime = checkTime;
-        continue;
-      }
-    }
-    
-    groups.push({
-      tasks: [task],
-      firstCheckTime: checkTime,
-      lastCheckTime: checkTime
-    });
-  }
-  
-  return groups;
-}
-
-async function executePush(targetPath, tasks) {
-  const groups = chainGroupTasks(tasks);
-  
-  for (const group of groups) {
-    const taskCount = group.tasks.length;
-    
-    const pushData = {
-      strmtask: CONFIG.strmTasks.join(','),
-      event: 'cs_strm',
-      savepath: targetPath
-    };
-
-    try {
-      await axios.post(CONFIG.targetWebhook, pushData, {
-        headers: { 'Content-Type': 'application/json; charset=utf-8' }
-      });
-
-      for (const task of group.tasks) {
-        sentTaskRecords[task.id] = task.lastFileUpdateTime;
-      }
-      saveSentTaskRecords(sentTaskRecords);
-
-      if (taskCount === 1) {
-        const task = group.tasks[0];
-        console.log(`[${getShanghaiTime()}] ✅ 推送成功
-├─ 任务ID：${task.id}
-├─ 资源名称：${task.resourceName}
-├─ 推送路径：${targetPath}
-└─ 推送方式：单独推送`);
-      } else {
-        const resourceNames = group.tasks.map(t => t.resourceName).join(',');
-        const taskIds = group.tasks.map(t => t.id).join(',');
-        console.log(`[${getShanghaiTime()}] ✅ 推送成功（合并推送）
-├─ 合并任务数：${taskCount}个
-├─ 任务ID列表：${taskIds}
-├─ 资源名称：${resourceNames}
-├─ 推送路径：${targetPath}
-└─ 时间跨度：${Math.round((group.lastCheckTime - group.firstCheckTime) / 1000)}秒`);
-      }
-    } catch (pushError) {
-      console.error(`[${getShanghaiTime()}] ❌ 推送失败 [${targetPath}]:`, pushError.message);
-    }
-  }
-  
-  waitingQueue.delete(targetPath);
-}
-
-function canJoinChain(newTask, existingTasks) {
-  if (existingTasks.length === 0) return true;
-  
-  const sorted = [...existingTasks, newTask].sort((a, b) => 
-    new Date(a.lastCheckTime) - new Date(b.lastCheckTime)
-  );
-  
-  const newIndex = sorted.findIndex(t => t.id === newTask.id);
-  
-  if (newIndex > 0) {
-    const prevTask = sorted[newIndex - 1];
-    const prevCheckTime = new Date(prevTask.lastCheckTime).getTime();
-    const newCheckTime = new Date(newTask.lastCheckTime).getTime();
-    if (newCheckTime - prevCheckTime >= TIME_WINDOW_SECONDS * 1000) {
-      return false;
-    }
-  }
-  
-  if (newIndex < sorted.length - 1) {
-    const nextTask = sorted[newIndex + 1];
-    const nextCheckTime = new Date(nextTask.lastCheckTime).getTime();
-    const newCheckTime = new Date(newTask.lastCheckTime).getTime();
-    if (nextCheckTime - newCheckTime >= TIME_WINDOW_SECONDS * 1000) {
-      return false;
-    }
-  }
-  
-  return true;
-}
-
-// 判断是否过期（超过120秒）
-function isExpired(task) {
-  const checkTime = new Date(task.lastCheckTime).getTime();
-  const now = Date.now();
-  return (now - checkTime) >= TIME_WINDOW_SECONDS * 1000;
-}
-
-function addToWaitingQueue(task, targetPath) {
-  const expired = isExpired(task);
-  
-  // 队列不存在
-  if (!waitingQueue.has(targetPath)) {
-    // 过期任务：立即推送
-    if (expired) {
-      console.log(`[${getShanghaiTime()}] ⚡ 检测到过期任务，立即推送`);
-      executePush(targetPath, [task]);
-      return true;
-    }
-    
-    // 新任务：创建队列，等待120秒
-    waitingQueue.set(targetPath, {
-      tasks: [task],
-      timer: setTimeout(async () => {
-        const currentQueue = waitingQueue.get(targetPath);
-        if (currentQueue && currentQueue.tasks.length > 0) {
-          await executePush(targetPath, currentQueue.tasks);
-        }
-      }, TIME_WINDOW_SECONDS * 1000)
-    });
-    return true;
-  }
-  
-  const queue = waitingQueue.get(targetPath);
-  
-  // 任务已在队列中
-  if (queue.tasks.some(t => t.id === task.id)) {
-    return false;
-  }
-  
-  // 过期任务：立即推送整个队列
-  if (expired) {
-    console.log(`[${getShanghaiTime()}] ⚡ 检测到过期任务，立即推送队列`);
-    clearTimeout(queue.timer);
-    queue.tasks.push(task);
-    executePush(targetPath, queue.tasks);
-    return true;
-  }
-  
-  // 链式判断
-  if (!canJoinChain(task, queue.tasks)) {
-    console.log(`[${getShanghaiTime()}] 🔄 路径 ${targetPath} 新任务超出窗口，先推送现有任务`);
-    
-    clearTimeout(queue.timer);
-    executePush(targetPath, [...queue.tasks]);
-    
-    waitingQueue.set(targetPath, {
-      tasks: [task],
-      timer: setTimeout(async () => {
-        const currentQueue = waitingQueue.get(targetPath);
-        if (currentQueue && currentQueue.tasks.length > 0) {
-          await executePush(targetPath, currentQueue.tasks);
-        }
-      }, TIME_WINDOW_SECONDS * 1000)
-    });
-    return true;
-  }
-  
-  // 加入队列（不重置定时器）
-  queue.tasks.push(task);
-  return true;
-}
-
+// ===== 核心轮询：自动判断路径延迟 =====
 async function runPolling() {
   try {
     const res = await axios.get(CONFIG.projectApi, {
@@ -280,7 +107,7 @@ async function runPolling() {
     if (!res.data?.success || !Array.isArray(res.data.data)) {
       const now = Date.now();
       if (now - lastNoTaskLogAt >= NO_TASK_LOG_INTERVAL) {
-        console.log(`[${getShanghaiTime()}] ⏳ 暂无新任务`);
+        console.log(`[${getShanghaiTime()}] API无有效数据`);
         lastNoTaskLogAt = now;
       }
       return;
@@ -302,32 +129,49 @@ async function runPolling() {
 
     lastNoTaskLogAt = 0;
 
-    let newTaskCount = 0;
     for (const task of tasks) {
       const targetPath = extractTargetPath(task.realFolderName, task.resourceName);
-      const oldTime = sentTaskRecords[task.id];
-      const newTime = task.lastFileUpdateTime;
-      
       if (!targetPath) {
-        if (oldTime === undefined || oldTime !== newTime) {
-          sentTaskRecords[task.id] = newTime;
-        }
+        sentTaskRecords[task.id] = task.lastFileUpdateTime;
+        saveSentTaskRecords(sentTaskRecords);
         continue;
       }
-      
+
+      const oldTime = sentTaskRecords[task.id];
+      const newTime = task.lastFileUpdateTime;
+
+      // 任务未更新则跳过
       if (oldTime !== undefined && oldTime === newTime) {
         continue;
       }
-      
-      if (addToWaitingQueue(task, targetPath)) {
-        newTaskCount++;
-      }
-    }
-    
-    saveSentTaskRecords(sentTaskRecords);
 
-    if (newTaskCount > 0) {
-      console.log(`[${getShanghaiTime()}] 📥 新增 ${newTaskCount} 个任务到等待队列`);
+      // ===== 核心：自动判断延迟 =====
+      // 判断路径是否以 /电影 结尾（区分大小写？这里转小写了，所以匹配）
+      const taskDelay = targetPath.endsWith('/电影') ? DELAY_RULE.movie : DELAY_RULE.other;
+
+      // 构造推送数据
+      const pushData = {
+        strmtask: CONFIG.strmTasks.join(','),
+        event: 'cs_strm',
+        savepath: targetPath,
+        delay: taskDelay
+      };
+
+      await axios.post(CONFIG.targetWebhook, pushData, {
+        headers: { 'Content-Type': 'application/json; charset=utf-8' }
+      });
+
+      // 更新持久化记录
+      sentTaskRecords[task.id] = newTime;
+      saveSentTaskRecords(sentTaskRecords);
+
+      const type = oldTime === undefined ? '首次' : '更新';
+      console.log(`[${getShanghaiTime()}] ✅ ${type}推送成功
+├─ 任务ID：${task.id}
+├─ 原始路径：${task.realFolderName}
+├─ 资源名称：${task.resourceName}
+├─ 推送路径：${targetPath}
+├─ 延迟时间：${taskDelay}秒 (${targetPath.endsWith('/电影') ? '电影路径' : '其他路径'})`);
     }
 
   } catch (error) {
@@ -335,13 +179,15 @@ async function runPolling() {
   }
 }
 
+// ===== 启动 =====
 checkRequiredEnv();
 console.log(`[${getShanghaiTime()}] 🚀 脚本启动成功
 ├─ 轮询间隔：${CONFIG.pollInterval}秒
-└─ 时间窗口：${TIME_WINDOW_SECONDS}秒（过期任务立即推送）`);
+├─ 延迟规则：路径以 /电影 结尾 → 15秒 | 其他路径 → 90秒`);
 runPolling();
 setInterval(runPolling, CONFIG.pollInterval * 1000);
 
+// ===== 停止 =====
 process.on('SIGINT', () => {
   console.log(`\n[${getShanghaiTime()}] 📤 脚本停止`);
   process.exit(0);
