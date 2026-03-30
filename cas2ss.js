@@ -198,7 +198,19 @@ function canJoinChain(newTask, existingTasks) {
   return true;
 }
 
+// 检查任务是否已在等待队列中
+function isTaskInQueue(taskId, targetPath) {
+  if (!waitingQueue.has(targetPath)) return false;
+  const queue = waitingQueue.get(targetPath);
+  return queue.tasks.some(t => t.id === taskId);
+}
+
 function addToWaitingQueue(task, targetPath) {
+  // 检查任务是否已在队列中
+  if (isTaskInQueue(task.id, targetPath)) {
+    return false; // 已存在，不重复添加
+  }
+  
   if (!waitingQueue.has(targetPath)) {
     waitingQueue.set(targetPath, {
       tasks: [],
@@ -224,7 +236,7 @@ function addToWaitingQueue(task, targetPath) {
     });
     
     schedulePush(targetPath, task);
-    return;
+    return true;
   }
   
   queue.tasks.push(task);
@@ -234,6 +246,7 @@ function addToWaitingQueue(task, targetPath) {
   }
   
   schedulePush(targetPath, task);
+  return true;
 }
 
 function schedulePush(targetPath, lastTask) {
@@ -242,8 +255,6 @@ function schedulePush(targetPath, lastTask) {
   
   const now = Date.now();
   const lastCreatedAt = new Date(lastTask.createdAt).getTime();
-  
-  // 关键修正：推送时间 = max(创建时间, 当前时间) + 120秒
   const baseTime = Math.max(lastCreatedAt, now);
   const pushTime = baseTime + TIME_WINDOW_SECONDS * 1000;
   const delay = pushTime - now;
@@ -300,12 +311,15 @@ async function runPolling() {
         continue;
       }
       
+      // 检查是否已推送过
       if (oldTime !== undefined && oldTime === newTime) {
         continue;
       }
       
-      addToWaitingQueue(task, targetPath);
-      newTaskCount++;
+      // 添加到队列（会自动去重）
+      if (addToWaitingQueue(task, targetPath)) {
+        newTaskCount++;
+      }
     }
     
     saveSentTaskRecords(sentTaskRecords);
