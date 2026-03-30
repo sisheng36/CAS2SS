@@ -12,11 +12,8 @@ const CONFIG = {
   persistFile: path.join(__dirname, 'data/sent-tasks.json')
 };
 
-// 固定延迟规则：电影结尾15s，其他90s
-const DELAY_RULE = {
-  movie: 15,
-  other: 90
-};
+// 时间窗口：相邻任务间隔 < 120秒则合并，等待120秒后推送
+const TIME_WINDOW_SECONDS = 120;
 
 // ===== 上海时间 =====
 function getShanghaiTime() {
@@ -33,7 +30,7 @@ function getShanghaiTime() {
   return new Intl.DateTimeFormat('zh-CN', options).format(new Date()).replace(/\//g, '-');
 }
 
-// ===== 路径截取（完全不变）=====
+// ===== 路径截取 =====
 function extractTargetPath(realFolderName, resourceName) {
   if (!realFolderName || !resourceName) return '';
   const cleanPath = realFolderName.trim().replace(/\/+/g, '/').replace(/^\/|\/$/g, '').toLowerCase();
@@ -46,7 +43,7 @@ function extractTargetPath(realFolderName, resourceName) {
   return targetParts.length > 0 ? `/${targetParts.join('/')}` : '';
 }
 
-// ===== 持久化：存储 { [task.id]: lastFileUpdateTime } =====
+// ===== 持久化 =====
 function initSentTaskRecords() {
   try {
     const dataDir = path.dirname(CONFIG.persistFile);
@@ -67,7 +64,7 @@ function initSentTaskRecords() {
 
 function saveSentTaskRecords(records) {
   try {
-    fs.writeFileSync(CONFIG.persistFile, JSON.stringify(records), 'utf8');
+    fs.writeFileSync(CONFIG.persistFile, JSON.stringify(records, null, 2), 'utf8');
   } catch (error) {
     console.error(`[${getShanghaiTime()}] ❌ 保存任务记录失败:`, error.message);
   }
@@ -75,9 +72,9 @@ function saveSentTaskRecords(records) {
 
 let sentTaskRecords = initSentTaskRecords();
 
-// ===== 1分钟只打一次无任务日志 =====
+// ===== 日志节流 =====
 let lastNoTaskLogAt = 0;
-const NO_TASK_LOG_INTERVAL = 60 * 1000;
+const NO_TASK_LOG_INTERVAL = 60 * 1000; // 1分钟
 
 // ===== 环境检查 =====
 function checkRequiredEnv() {
@@ -97,27 +94,183 @@ function checkRequiredEnv() {
   }
 }
 
-// ===== 核心轮询：自动判断路径延迟 =====
+// ===== 等待队列 =====
+const waitingQueue = new Map();
+
+// ===== 链式分组函数 =====
+function chainGroupTasks(tasks) {
+  const sorted = [...tasks].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  
+  const groups = [];
+  for (const task of sorted) {
+    const createdAt = new Date(task.createdAt).getTime();
+    
+    if (groups.length > 0) {
+      const lastGroup = groups[groups.length - 1];
+      const lastTask = lastGroup.tasks[lastGroup.tasks.length - 1];
+      const lastCreatedAt = new Date(lastTask.createdAt).getTime();
+      const timeDiff = createdAt - lastCreatedAt;
+      
+      if (timeDiff < TIME_WINDOW_SECONDS * 1000) {
+        lastGroup.tasks.push(task);
+        lastGroup.lastCreatedAt = createdAt;
+        continue;
+      }
+    }
+    
+    groups.push({
+      tasks: [task],
+      firstCreatedAt: createdAt,
+      lastCreatedAt: createdAt
+    });
+  }
+  
+  return groups;
+}
+
+// ===== 执行推送 =====
+async function executePush(targetPath, tasks) {
+  const groups = chainGroupTasks(tasks);
+  
+  for (const group of groups) {
+    const taskCount = group.tasks.length;
+    
+    const pushData = {
+      strmtask: CONFIG.strmTasks.join(','),
+      event: 'cs_strm',
+      savepath: targetPath
+    };
+
+    try {
+      await axios.post(CONFIG.targetWebhook, pushData, {
+        headers: { 'Content-Type': 'application/json; charset=utf-8' }
+      });
+
+      for (const task of group.tasks) {
+        sentTaskRecords[task.id] = task.lastFileUpdateTime;
+      }
+      saveSentTaskRecords(sentTaskRecords);
+
+      if (taskCount === 1) {
+        const task = group.tasks[0];
+        console.log(`[${getShanghaiTime()}] ✅ 推送成功
+├─ 任务ID：${task.id}
+├─ 资源名称：${task.resourceName}
+├─ 推送路径：${targetPath}
+└─ 推送方式：单独推送`);
+      } else {
+        const resourceNames = group.tasks.map(t => t.resourceName).join(',');
+        const taskIds = group.tasks.map(t => t.id).join(',');
+        console.log(`[${getShanghaiTime()}] ✅ 推送成功（合并推送）
+├─ 合并任务数：${taskCount}个
+├─ 任务ID列表：${taskIds}
+├─ 资源名称：${resourceNames}
+├─ 推送路径：${targetPath}
+├─ 创建时间范围：${new Date(group.firstCreatedAt).toISOString()} ~ ${new Date(group.lastCreatedAt).toISOString()}
+└─ 时间跨度：${Math.round((group.lastCreatedAt - group.firstCreatedAt) / 1000)}秒`);
+      }
+    } catch (pushError) {
+      console.error(`[${getShanghaiTime()}] ❌ 推送失败 [${targetPath}]:`, pushError.message);
+    }
+  }
+  
+  waitingQueue.delete(targetPath);
+}
+
+// ===== 检查新任务是否可以加入链 =====
+function canJoinChain(newTask, existingTasks) {
+  if (existingTasks.length === 0) return true;
+  
+  const sorted = [...existingTasks, newTask].sort((a, b) => 
+    new Date(a.createdAt) - new Date(b.createdAt)
+  );
+  
+  const newIndex = sorted.findIndex(t => t.id === newTask.id);
+  
+  if (newIndex > 0) {
+    const prevTask = sorted[newIndex - 1];
+    const prevCreatedAt = new Date(prevTask.createdAt).getTime();
+    const newCreatedAt = new Date(newTask.createdAt).getTime();
+    if (newCreatedAt - prevCreatedAt >= TIME_WINDOW_SECONDS * 1000) {
+      return false;
+    }
+  }
+  
+  if (newIndex < sorted.length - 1) {
+    const nextTask = sorted[newIndex + 1];
+    const nextCreatedAt = new Date(nextTask.createdAt).getTime();
+    const newCreatedAt = new Date(newTask.createdAt).getTime();
+    if (nextCreatedAt - newCreatedAt >= TIME_WINDOW_SECONDS * 1000) {
+      return false;
+    }
+  }
+  
+  return true;
+}
+
+// ===== 将任务加入等待队列 =====
+function addToWaitingQueue(task, targetPath) {
+  if (!waitingQueue.has(targetPath)) {
+    waitingQueue.set(targetPath, {
+      tasks: [],
+      timer: null
+    });
+  }
+  
+  const queue = waitingQueue.get(targetPath);
+  
+  if (!canJoinChain(task, queue.tasks)) {
+    console.log(`[${getShanghaiTime()}] 🔄 路径 ${targetPath} 新任务超出窗口，先推送现有任务`);
+    
+    if (queue.timer) {
+      clearTimeout(queue.timer);
+    }
+    
+    const existingTasks = [...queue.tasks];
+    executePush(targetPath, existingTasks);
+    
+    queue.tasks = [];
+    queue.timer = null;
+  }
+  
+  queue.tasks.push(task);
+  
+  if (queue.timer) {
+    clearTimeout(queue.timer);
+  }
+  
+  queue.timer = setTimeout(async () => {
+    const currentQueue = waitingQueue.get(targetPath);
+    if (currentQueue && currentQueue.tasks.length > 0) {
+      await executePush(targetPath, currentQueue.tasks);
+    }
+  }, TIME_WINDOW_SECONDS * 1000);
+}
+
+// ===== 核心轮询 =====
 async function runPolling() {
   try {
     const res = await axios.get(CONFIG.projectApi, {
       headers: { 'x-api-key': CONFIG.apiKey }
     });
 
+    // API返回无效数据
     if (!res.data?.success || !Array.isArray(res.data.data)) {
       const now = Date.now();
       if (now - lastNoTaskLogAt >= NO_TASK_LOG_INTERVAL) {
-        console.log(`[${getShanghaiTime()}] API无有效数据`);
+        console.log(`[${getShanghaiTime()}] ⏳ 暂无新任务`);
         lastNoTaskLogAt = now;
       }
       return;
     }
 
+    // 过滤符合条件的任务
     const tasks = res.data.data.filter(task =>
       task.status === CONFIG.filterStatus &&
       task.realFolderName
     );
 
+    // 无符合条件的任务
     if (tasks.length === 0) {
       const now = Date.now();
       if (now - lastNoTaskLogAt >= NO_TASK_LOG_INTERVAL) {
@@ -127,51 +280,36 @@ async function runPolling() {
       return;
     }
 
+    // 有任务，重置节流（确保下次无任务时能立即输出）
     lastNoTaskLogAt = 0;
 
+    // 将新任务加入等待队列
+    let newTaskCount = 0;
     for (const task of tasks) {
       const targetPath = extractTargetPath(task.realFolderName, task.resourceName);
-      if (!targetPath) {
-        sentTaskRecords[task.id] = task.lastFileUpdateTime;
-        saveSentTaskRecords(sentTaskRecords);
-        continue;
-      }
-
       const oldTime = sentTaskRecords[task.id];
       const newTime = task.lastFileUpdateTime;
-
-      // 任务未更新则跳过
+      
+      if (!targetPath) {
+        if (oldTime === undefined || oldTime !== newTime) {
+          sentTaskRecords[task.id] = newTime;
+        }
+        continue;
+      }
+      
       if (oldTime !== undefined && oldTime === newTime) {
         continue;
       }
+      
+      addToWaitingQueue(task, targetPath);
+      newTaskCount++;
+    }
+    
+    saveSentTaskRecords(sentTaskRecords);
 
-      // ===== 核心：自动判断延迟 =====
-      // 判断路径是否以 /电影 结尾（区分大小写？这里转小写了，所以匹配）
-      const taskDelay = targetPath.endsWith('/电影') ? DELAY_RULE.movie : DELAY_RULE.other;
-
-      // 构造推送数据
-      const pushData = {
-        strmtask: CONFIG.strmTasks.join(','),
-        event: 'cs_strm',
-        savepath: targetPath,
-        delay: taskDelay
-      };
-
-      await axios.post(CONFIG.targetWebhook, pushData, {
-        headers: { 'Content-Type': 'application/json; charset=utf-8' }
-      });
-
-      // 更新持久化记录
-      sentTaskRecords[task.id] = newTime;
-      saveSentTaskRecords(sentTaskRecords);
-
-      const type = oldTime === undefined ? '首次' : '更新';
-      console.log(`[${getShanghaiTime()}] ✅ ${type}推送成功
-├─ 任务ID：${task.id}
-├─ 原始路径：${task.realFolderName}
-├─ 资源名称：${task.resourceName}
-├─ 推送路径：${targetPath}
-├─ 延迟时间：${taskDelay}秒 (${targetPath.endsWith('/电影') ? '电影路径' : '其他路径'})`);
+    // 有新任务时，每次轮询都输出日志
+    if (newTaskCount > 0) {
+      console.log(`[${getShanghaiTime()}] 📥 新增 ${newTaskCount} 个任务到等待队列`);
     }
 
   } catch (error) {
@@ -183,7 +321,7 @@ async function runPolling() {
 checkRequiredEnv();
 console.log(`[${getShanghaiTime()}] 🚀 脚本启动成功
 ├─ 轮询间隔：${CONFIG.pollInterval}秒
-├─ 延迟规则：路径以 /电影 结尾 → 15秒 | 其他路径 → 90秒`);
+└─ 时间窗口：${TIME_WINDOW_SECONDS}秒（相邻任务间隔<${TIME_WINDOW_SECONDS}秒则合并，等待${TIME_WINDOW_SECONDS}秒后推送）`);
 runPolling();
 setInterval(runPolling, CONFIG.pollInterval * 1000);
 
