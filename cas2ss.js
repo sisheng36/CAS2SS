@@ -91,29 +91,31 @@ function checkRequiredEnv() {
 const waitingQueue = new Map();
 
 function chainGroupTasks(tasks) {
-  const sorted = [...tasks].sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+  const sorted = [...tasks].sort((a, b) => 
+    new Date(a.lastCheckTime) - new Date(b.lastCheckTime)
+  );
   
   const groups = [];
   for (const task of sorted) {
-    const createdAt = new Date(task.createdAt).getTime();
+    const checkTime = new Date(task.lastCheckTime).getTime();
     
     if (groups.length > 0) {
       const lastGroup = groups[groups.length - 1];
       const lastTask = lastGroup.tasks[lastGroup.tasks.length - 1];
-      const lastCreatedAt = new Date(lastTask.createdAt).getTime();
-      const timeDiff = createdAt - lastCreatedAt;
+      const lastCheckTime = new Date(lastTask.lastCheckTime).getTime();
+      const timeDiff = checkTime - lastCheckTime;
       
       if (timeDiff < TIME_WINDOW_SECONDS * 1000) {
         lastGroup.tasks.push(task);
-        lastGroup.lastCreatedAt = createdAt;
+        lastGroup.lastCheckTime = checkTime;
         continue;
       }
     }
     
     groups.push({
       tasks: [task],
-      firstCreatedAt: createdAt,
-      lastCreatedAt: createdAt
+      firstCheckTime: checkTime,
+      lastCheckTime: checkTime
     });
   }
   
@@ -157,8 +159,7 @@ async function executePush(targetPath, tasks) {
 ├─ 任务ID列表：${taskIds}
 ├─ 资源名称：${resourceNames}
 ├─ 推送路径：${targetPath}
-├─ 创建时间范围：${new Date(group.firstCreatedAt).toISOString()} ~ ${new Date(group.lastCreatedAt).toISOString()}
-└─ 时间跨度：${Math.round((group.lastCreatedAt - group.firstCreatedAt) / 1000)}秒`);
+└─ 时间跨度：${Math.round((group.lastCheckTime - group.firstCheckTime) / 1000)}秒`);
       }
     } catch (pushError) {
       console.error(`[${getShanghaiTime()}] ❌ 推送失败 [${targetPath}]:`, pushError.message);
@@ -172,25 +173,25 @@ function canJoinChain(newTask, existingTasks) {
   if (existingTasks.length === 0) return true;
   
   const sorted = [...existingTasks, newTask].sort((a, b) => 
-    new Date(a.createdAt) - new Date(b.createdAt)
+    new Date(a.lastCheckTime) - new Date(b.lastCheckTime)
   );
   
   const newIndex = sorted.findIndex(t => t.id === newTask.id);
   
   if (newIndex > 0) {
     const prevTask = sorted[newIndex - 1];
-    const prevCreatedAt = new Date(prevTask.createdAt).getTime();
-    const newCreatedAt = new Date(newTask.createdAt).getTime();
-    if (newCreatedAt - prevCreatedAt >= TIME_WINDOW_SECONDS * 1000) {
+    const prevCheckTime = new Date(prevTask.lastCheckTime).getTime();
+    const newCheckTime = new Date(newTask.lastCheckTime).getTime();
+    if (newCheckTime - prevCheckTime >= TIME_WINDOW_SECONDS * 1000) {
       return false;
     }
   }
   
   if (newIndex < sorted.length - 1) {
     const nextTask = sorted[newIndex + 1];
-    const nextCreatedAt = new Date(nextTask.createdAt).getTime();
-    const newCreatedAt = new Date(newTask.createdAt).getTime();
-    if (nextCreatedAt - newCreatedAt >= TIME_WINDOW_SECONDS * 1000) {
+    const nextCheckTime = new Date(nextTask.lastCheckTime).getTime();
+    const newCheckTime = new Date(newTask.lastCheckTime).getTime();
+    if (nextCheckTime - newCheckTime >= TIME_WINDOW_SECONDS * 1000) {
       return false;
     }
   }
@@ -198,73 +199,76 @@ function canJoinChain(newTask, existingTasks) {
   return true;
 }
 
-// 检查任务是否已在等待队列中
-function isTaskInQueue(taskId, targetPath) {
-  if (!waitingQueue.has(targetPath)) return false;
-  const queue = waitingQueue.get(targetPath);
-  return queue.tasks.some(t => t.id === taskId);
+// 判断是否过期（超过120秒）
+function isExpired(task) {
+  const checkTime = new Date(task.lastCheckTime).getTime();
+  const now = Date.now();
+  return (now - checkTime) >= TIME_WINDOW_SECONDS * 1000;
 }
 
 function addToWaitingQueue(task, targetPath) {
-  // 检查任务是否已在队列中
-  if (isTaskInQueue(task.id, targetPath)) {
-    return false; // 已存在，不重复添加
-  }
+  const expired = isExpired(task);
   
+  // 队列不存在
   if (!waitingQueue.has(targetPath)) {
-    waitingQueue.set(targetPath, {
-      tasks: [],
-      timer: null
-    });
-  }
-  
-  const queue = waitingQueue.get(targetPath);
-  
-  if (!canJoinChain(task, queue.tasks)) {
-    console.log(`[${getShanghaiTime()}] 🔄 路径 ${targetPath} 新任务超出窗口，先推送现有任务`);
-    
-    if (queue.timer) {
-      clearTimeout(queue.timer);
+    // 过期任务：立即推送
+    if (expired) {
+      console.log(`[${getShanghaiTime()}] ⚡ 检测到过期任务，立即推送`);
+      executePush(targetPath, [task]);
+      return true;
     }
     
-    const existingTasks = [...queue.tasks];
-    executePush(targetPath, existingTasks);
-    
+    // 新任务：创建队列，等待120秒
     waitingQueue.set(targetPath, {
       tasks: [task],
-      timer: null
+      timer: setTimeout(async () => {
+        const currentQueue = waitingQueue.get(targetPath);
+        if (currentQueue && currentQueue.tasks.length > 0) {
+          await executePush(targetPath, currentQueue.tasks);
+        }
+      }, TIME_WINDOW_SECONDS * 1000)
     });
-    
-    schedulePush(targetPath, task);
     return true;
   }
   
-  queue.tasks.push(task);
+  const queue = waitingQueue.get(targetPath);
   
-  if (queue.timer) {
-    clearTimeout(queue.timer);
+  // 任务已在队列中
+  if (queue.tasks.some(t => t.id === task.id)) {
+    return false;
   }
   
-  schedulePush(targetPath, task);
+  // 过期任务：立即推送整个队列
+  if (expired) {
+    console.log(`[${getShanghaiTime()}] ⚡ 检测到过期任务，立即推送队列`);
+    clearTimeout(queue.timer);
+    queue.tasks.push(task);
+    executePush(targetPath, queue.tasks);
+    return true;
+  }
+  
+  // 链式判断
+  if (!canJoinChain(task, queue.tasks)) {
+    console.log(`[${getShanghaiTime()}] 🔄 路径 ${targetPath} 新任务超出窗口，先推送现有任务`);
+    
+    clearTimeout(queue.timer);
+    executePush(targetPath, [...queue.tasks]);
+    
+    waitingQueue.set(targetPath, {
+      tasks: [task],
+      timer: setTimeout(async () => {
+        const currentQueue = waitingQueue.get(targetPath);
+        if (currentQueue && currentQueue.tasks.length > 0) {
+          await executePush(targetPath, currentQueue.tasks);
+        }
+      }, TIME_WINDOW_SECONDS * 1000)
+    });
+    return true;
+  }
+  
+  // 加入队列（不重置定时器）
+  queue.tasks.push(task);
   return true;
-}
-
-function schedulePush(targetPath, lastTask) {
-  const queue = waitingQueue.get(targetPath);
-  if (!queue) return;
-  
-  const now = Date.now();
-  const lastCreatedAt = new Date(lastTask.createdAt).getTime();
-  const baseTime = Math.max(lastCreatedAt, now);
-  const pushTime = baseTime + TIME_WINDOW_SECONDS * 1000;
-  const delay = pushTime - now;
-  
-  queue.timer = setTimeout(async () => {
-    const currentQueue = waitingQueue.get(targetPath);
-    if (currentQueue && currentQueue.tasks.length > 0) {
-      await executePush(targetPath, currentQueue.tasks);
-    }
-  }, delay);
 }
 
 async function runPolling() {
@@ -311,12 +315,10 @@ async function runPolling() {
         continue;
       }
       
-      // 检查是否已推送过
       if (oldTime !== undefined && oldTime === newTime) {
         continue;
       }
       
-      // 添加到队列（会自动去重）
       if (addToWaitingQueue(task, targetPath)) {
         newTaskCount++;
       }
@@ -336,7 +338,7 @@ async function runPolling() {
 checkRequiredEnv();
 console.log(`[${getShanghaiTime()}] 🚀 脚本启动成功
 ├─ 轮询间隔：${CONFIG.pollInterval}秒
-└─ 时间窗口：${TIME_WINDOW_SECONDS}秒`);
+└─ 时间窗口：${TIME_WINDOW_SECONDS}秒（过期任务立即推送）`);
 runPolling();
 setInterval(runPolling, CONFIG.pollInterval * 1000);
 
