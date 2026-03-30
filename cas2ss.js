@@ -218,39 +218,35 @@ function addToWaitingQueue(task, targetPath) {
     const existingTasks = [...queue.tasks];
     executePush(targetPath, existingTasks);
     
-    // 创建新队列
     waitingQueue.set(targetPath, {
       tasks: [task],
       timer: null
     });
     
-    // 设置新任务的定时器
     schedulePush(targetPath, task);
     return;
   }
   
   queue.tasks.push(task);
   
-  // 清除现有定时器
   if (queue.timer) {
     clearTimeout(queue.timer);
   }
   
-  // 设置定时器（基于创建时间）
   schedulePush(targetPath, task);
 }
 
-// ===== 设置定时器（基于任务创建时间）=====
 function schedulePush(targetPath, lastTask) {
   const queue = waitingQueue.get(targetPath);
   if (!queue) return;
   
-  const lastCreatedAt = new Date(lastTask.createdAt).getTime();
-  const pushTime = lastCreatedAt + TIME_WINDOW_SECONDS * 1000; // 创建时间 + 120秒
   const now = Date.now();
-  const delay = Math.max(0, pushTime - now); // 延迟时间，可能为0（已过期）
+  const lastCreatedAt = new Date(lastTask.createdAt).getTime();
   
-  console.log(`[${getShanghaiTime()}] ⏰ 定时器设置：${new Date(pushTime).toISOString().replace('T', ' ').substring(0, 19)} 推送（延迟${Math.round(delay/1000)}秒）`);
+  // 关键修正：推送时间 = max(创建时间, 当前时间) + 120秒
+  const baseTime = Math.max(lastCreatedAt, now);
+  const pushTime = baseTime + TIME_WINDOW_SECONDS * 1000;
+  const delay = pushTime - now;
   
   queue.timer = setTimeout(async () => {
     const currentQueue = waitingQueue.get(targetPath);
@@ -326,7 +322,7 @@ async function runPolling() {
 checkRequiredEnv();
 console.log(`[${getShanghaiTime()}] 🚀 脚本启动成功
 ├─ 轮询间隔：${CONFIG.pollInterval}秒
-└─ 时间窗口：${TIME_WINDOW_SECONDS}秒（基于任务创建时间）`);
+└─ 时间窗口：${TIME_WINDOW_SECONDS}秒`);
 runPolling();
 setInterval(runPolling, CONFIG.pollInterval * 1000);
 
