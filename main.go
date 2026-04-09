@@ -234,7 +234,7 @@ func initSentTaskRecords() {
 		data = []byte("{}")
 	}
 
-	var records map[string]int64
+	var records map[string]string  
 	if err := json.Unmarshal(data, &records); err != nil {
 		fmt.Printf("[%s] ❌ 解析任务记录失败: %v\n", getShanghaiTime(), err)
 		os.WriteFile(config.PersistFile, []byte("{}"), 0644)
@@ -540,7 +540,6 @@ func executePush(targetPath string, tasks []Task) {
 		// 更新已发送记录
 		for _, task := range group.tasks {
 			sentTaskRecordsMu.Lock()
-			lastUpdateTime, _ := task.LastFileUpdateTime.Int64()
 			sentTaskRecords[task.ID.String()] = task.LastFileUpdateTime
 			sentTaskRecordsMu.Unlock()
 		}
