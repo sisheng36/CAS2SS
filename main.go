@@ -571,4 +571,12 @@ func executePush(targetPath string, tasks []Task) {
 				}
 			}
 			fmt.Printf("├─ 推送路径：%s\n", targetPath)
-			fmt.Printf("└─ 时间跨度：%d秒\n
+			timeSpan := group.lastCheckTime.Sub(group.firstCheckTime).Seconds()
+			fmt.Printf("└─ 时间跨度：%d秒\n", int(timeSpan))
+		}
+	}
+	// 删除队列
+	waitingQueueMu.Lock()
+	delete(waitingQueue, targetPath)
+	waitingQueueMu.Unlock()
+}
