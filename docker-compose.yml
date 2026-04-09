@@ -1,0 +1,20 @@
+services:
+  strm-push:
+    build: .
+    container_name: strm-push
+    restart: unless-stopped
+    environment:
+      - PROJECT_API=http://your-api-url
+      - API_KEY=your-api-key
+      - TARGET_WEBHOOK=http://your-webhook-url
+      - POLL_INTERVAL=10
+      - STRM_TASKS=task1,task2
+      - FILTER_STATUS=completed
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
