@@ -318,7 +318,7 @@ func runPolling() {
 		sentTaskRecordsMu.RUnlock()
 
 		if targetPath == "" {
-			if !exists || oldTime != task.LastFileUpdateTime {
+			if !exists || oldTime != lastUpdateTime {
 				sentTaskRecordsMu.Lock()
 				sentTaskRecords[task.ID.String()] = task.LastFileUpdateTime
 				sentTaskRecordsMu.Unlock()
