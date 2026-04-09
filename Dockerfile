@@ -1,16 +1,36 @@
-# 阶段1：构建依赖
-FROM node:18-alpine AS builder
-WORKDIR /app
-COPY package.json ./
-RUN npm install --production
+# 阶段1：编译
+FROM golang:1.21-alpine AS builder
 
-# 阶段2：生成最终镜像（更小体积）
-FROM node:18-alpine
+WORKDIR /build
+
+# 复制依赖文件
+COPY go.mod ./
+
+# 下载依赖
+RUN go mod download
+
+# 复制源代码
+COPY main.go ./
+
+# 静态编译（最小化二进制文件）
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o strm-push .
+
+# 阶段2：运行
+FROM alpine:latest
+
+# 安装时区数据和证书
+RUN apk --no-cache add ca-certificates tzdata
+
 WORKDIR /app
-# 复制构建阶段的依赖和脚本
-COPY --from=builder /app/node_modules ./node_modules
-COPY cas2ss.js ./
-# 创建数据目录（持久化任务ID）
+
+# 从编译阶段复制二进制文件
+COPY --from=builder /build/strm-push .
+
+# 创建数据目录
 RUN mkdir -p /app/data
-# 启动脚本
-CMD ["node", "cas2ss.js"]
+
+# 设置时区
+ENV TZ=Asia/Shanghai
+
+# 运行
+CMD ["./strm-push"]
