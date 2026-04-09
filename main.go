@@ -314,13 +314,13 @@ func runPolling() {
 		targetPath := extractTargetPath(task.RealFolderName, task.ResourceName)
 
 		sentTaskRecordsMu.RLock()
-		oldTime, exists := sentTaskRecords[task.ID]
+		oldTime, exists := sentTaskRecords[task.ID.String()]
 		sentTaskRecordsMu.RUnlock()
 
 		if targetPath == "" {
 			if !exists || oldTime != task.LastFileUpdateTime {
 				sentTaskRecordsMu.Lock()
-				sentTaskRecords[task.ID] = task.LastFileUpdateTime
+				sentTaskRecords[task.ID.String()] = task.LastFileUpdateTime
 				sentTaskRecordsMu.Unlock()
 			}
 			continue
@@ -376,7 +376,7 @@ func addToWaitingQueue(task Task, targetPath string) bool {
 
 	// 任务已在队列中
 	for _, t := range queue.tasks {
-		if t.ID == task.ID {
+		if t.ID.String() == task.ID.String() {
 			return false
 		}
 	}
@@ -437,7 +437,7 @@ func canJoinChain(newTask Task, existingTasks []Task, targetPath string) bool {
 
 	newIndex := -1
 	for i, t := range allTasks {
-		if t.ID == newTask.ID {
+		if t.ID.String() == newTask.ID.String() {
 			newIndex = i
 			break
 		}
@@ -540,7 +540,7 @@ func executePush(targetPath string, tasks []Task) {
 		// 更新已发送记录
 		for _, task := range group.tasks {
 			sentTaskRecordsMu.Lock()
-			sentTaskRecords[task.ID] = task.LastFileUpdateTime
+			sentTaskRecords[task.ID.String()] = task.LastFileUpdateTime
 			sentTaskRecordsMu.Unlock()
 		}
 		saveSentTaskRecords()
@@ -556,7 +556,7 @@ func executePush(targetPath string, tasks []Task) {
 		} else {
 			taskIds := make([]string, len(group.tasks))
 			for i, t := range group.tasks {
-				taskIds[i] = t.ID
+				taskIds[i] = t.ID.String()
 			}
 
 			fmt.Printf("[%s] ✅ 推送成功（合并推送）\n", getShanghaiTime())
