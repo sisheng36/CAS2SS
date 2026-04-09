@@ -14,13 +14,13 @@ import (
 
 // 配置结构
 type Config struct {
-	ProjectAPI     string
-	APIKey         string
-	TargetWebhook  string
-	PollInterval   int
-	StrmTasks      []string
-	FilterStatus   string
-	PersistFile    string
+	ProjectAPI    string
+	APIKey        string
+	TargetWebhook string
+	PollInterval  int
+	StrmTasks     []string
+	FilterStatus  string
+	PersistFile   string
 }
 
 // 任务结构
@@ -35,7 +35,7 @@ type Task struct {
 
 // API响应结构
 type APIResponse struct {
-	Success bool `json:"success"`
+	Success bool   `json:"success"`
 	Data    []Task `json:"data"`
 }
 
@@ -46,21 +46,28 @@ type PushData struct {
 	SavePath string `json:"savepath"`
 }
 
+// 任务组
+type TaskGroup struct {
+	tasks          []Task
+	firstCheckTime time.Time
+	lastCheckTime  time.Time
+}
+
 // 等待队列项
 type QueueItem struct {
-	tasks    []Task
-	timer    *time.Timer
-	mu       sync.Mutex
+	tasks []Task
+	timer *time.Timer
+	mu    sync.Mutex
 }
 
 // 全局变量
 var (
-	config               Config
-	sentTaskRecords      = make(map[string]int64)
-	sentTaskRecordsMu    sync.RWMutex
-	waitingQueue         = make(map[string]*QueueItem)
-	waitingQueueMu       sync.Mutex
-	lastNoTaskLogAt      time.Time
+	config            Config
+	sentTaskRecords   = make(map[string]int64)
+	sentTaskRecordsMu sync.RWMutex
+	waitingQueue      = make(map[string]*QueueItem)
+	waitingQueueMu    sync.Mutex
+	lastNoTaskLogAt   time.Time
 )
 
 const (
@@ -347,7 +354,7 @@ func addToWaitingQueue(task Task, targetPath string) bool {
 			return true
 		}
 
-		// 新任务：创建队列，等待对应时间窗口
+		// 新任务：创建队列
 		item := &QueueItem{
 			tasks: []Task{task},
 		}
@@ -356,6 +363,7 @@ func addToWaitingQueue(task Task, targetPath string) bool {
 			if currentQueue, ok := waitingQueue[targetPath]; ok && len(currentQueue.tasks) > 0 {
 				go executePush(targetPath, currentQueue.tasks)
 			}
+			delete(waitingQueue, targetPath)
 			waitingQueueMu.Unlock()
 		})
 		waitingQueue[targetPath] = item
@@ -379,6 +387,7 @@ func addToWaitingQueue(task Task, targetPath string) bool {
 		queue.timer.Stop()
 		queue.tasks = append(queue.tasks, task)
 		go executePush(targetPath, queue.tasks)
+		delete(waitingQueue, targetPath)
 		return true
 	}
 
@@ -395,12 +404,13 @@ func addToWaitingQueue(task Task, targetPath string) bool {
 			if currentQueue, ok := waitingQueue[targetPath]; ok && len(currentQueue.tasks) > 0 {
 				go executePush(targetPath, currentQueue.tasks)
 			}
+			delete(waitingQueue, targetPath)
 			waitingQueueMu.Unlock()
 		})
 		return true
 	}
 
-	// 加入队列（不重置定时器）
+	// 加入队列
 	queue.tasks = append(queue.tasks, task)
 	return true
 }
@@ -468,12 +478,44 @@ func sortTasksByTime(tasks []Task) {
 	}
 }
 
-func executePush(targetPath string, tasks []Task) {
+func chainGroupTasks(tasks []Task, targetPath string) []TaskGroup {
 	timeWindow := getTimeWindowByPath(targetPath)
-	groups := chainGroupTasks(tasks, timeWindow)
+
+	sortedTasks := make([]Task, len(tasks))
+	copy(sortedTasks, tasks)
+	sortTasksByTime(sortedTasks)
+
+	var groups []TaskGroup
+
+	for _, task := range sortedTasks {
+		checkTime, _ := time.Parse(time.RFC3339, task.LastCheckTime)
+
+		if len(groups) > 0 {
+			lastGroup := &groups[len(groups)-1]
+			timeDiff := checkTime.Sub(lastGroup.lastCheckTime)
+
+			if timeDiff < time.Duration(timeWindow)*time.Second {
+				lastGroup.tasks = append(lastGroup.tasks, task)
+				lastGroup.lastCheckTime = checkTime
+				continue
+			}
+		}
+
+		groups = append(groups, TaskGroup{
+			tasks:          []Task{task},
+			firstCheckTime: checkTime,
+			lastCheckTime:  checkTime,
+		})
+	}
+
+	return groups
+}
+
+func executePush(targetPath string, tasks []Task) {
+	groups := chainGroupTasks(tasks, targetPath)
 
 	for _, group := range groups {
-		taskCount := len(group)
+		taskCount := len(group.tasks)
 
 		pushData := PushData{
 			StrmTask: strings.Join(config.StrmTasks, ","),
@@ -496,7 +538,7 @@ func executePush(targetPath string, tasks []Task) {
 		resp.Body.Close()
 
 		// 更新已发送记录
-		for _, task := range group {
+		for _, task := range group.tasks {
 			sentTaskRecordsMu.Lock()
 			sentTaskRecords[task.ID] = task.LastFileUpdateTime
 			sentTaskRecordsMu.Unlock()
@@ -505,15 +547,15 @@ func executePush(targetPath string, tasks []Task) {
 
 		// 输出日志
 		if taskCount == 1 {
-			task := group[0]
+			task := group.tasks[0]
 			fmt.Printf("[%s] ✅ 推送成功\n", getShanghaiTime())
 			fmt.Printf("├─ 任务ID：%s\n", task.ID)
 			fmt.Printf("├─ 资源名称：%s\n", task.ResourceName)
 			fmt.Printf("├─ 推送路径：%s\n", targetPath)
 			fmt.Println("└─ 推送方式：单独推送")
 		} else {
-			taskIds := make([]string, len(group))
-			for i, t := range group {
+			taskIds := make([]string, len(group.tasks))
+			for i, t := range group.tasks {
 				taskIds[i] = t.ID
 			}
 
@@ -521,18 +563,6 @@ func executePush(targetPath string, tasks []Task) {
 			fmt.Printf("├─ 合并任务数：%d个\n", taskCount)
 			fmt.Printf("├─ 任务ID列表：%s\n", strings.Join(taskIds, ","))
 			fmt.Println("├─ 资源名称：")
-			for i, t := range group {
-				if i == len(group)-1 {
-					fmt.Printf("│  └─ %s\n", t.ResourceName)
-				} else {
-					fmt.Printf("│  ├─ %s\n", t.ResourceName)
-				}
-			}
-			fmt.Printf("├─ 推送路径：%s\n", targetPath)
-			fmt.Printf("└─ 时间跨度：%d秒\n", int(group[len(group)-1].lastCheckTime.Sub(group[0].lastCheckTime).Seconds()))
-		}
-	}
-
-	// 删除队列
-	waitingQueueMu.Lock()
-	delete
+			for i, t := range group.tasks {
+				if i == len(group.tasks)-1 {
+					fmt.Printf("│ 
