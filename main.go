@@ -30,7 +30,7 @@ type Task struct {
 	RealFolderName     string      `json:"realFolderName"`
 	Status             string      `json:"status"`
 	LastCheckTime      string      `json:"lastCheckTime"`
-	LastFileUpdateTime int64       `json:"lastFileUpdateTime"`
+	LastFileUpdateTime json.Number `json:"lastFileUpdateTime"`
 }
 
 // API响应结构
@@ -310,30 +310,31 @@ func runPolling() {
 		return
 	}
 
-	for _, task := range filteredTasks {
-		targetPath := extractTargetPath(task.RealFolderName, task.ResourceName)
+for _, task := range filteredTasks {
+	targetPath := extractTargetPath(task.RealFolderName, task.ResourceName)
+	lastUpdateTime, _ := task.LastFileUpdateTime.Int64()
 
-		sentTaskRecordsMu.RLock()
-		oldTime, exists := sentTaskRecords[task.ID.String()]
-		sentTaskRecordsMu.RUnlock()
+	sentTaskRecordsMu.RLock()
+	oldTime, exists := sentTaskRecords[task.ID.String()]
+	sentTaskRecordsMu.RUnlock()
 
-		if targetPath == "" {
-			if !exists || oldTime != lastUpdateTime {
-				sentTaskRecordsMu.Lock()
-				sentTaskRecords[task.ID.String()] = task.LastFileUpdateTime
-				sentTaskRecordsMu.Unlock()
-			}
-			continue
+	if targetPath == "" {
+		if !exists || oldTime != lastUpdateTime {
+			sentTaskRecordsMu.Lock()
+			sentTaskRecords[task.ID.String()] = lastUpdateTime
+			sentTaskRecordsMu.Unlock()
 		}
-
-		if exists && oldTime == task.LastFileUpdateTime {
-			continue
-		}
-
-		if addToWaitingQueue(task, targetPath) {
-			fmt.Printf("[%s] 📥 新增任务到等待队列：%s\n", getShanghaiTime(), task.ResourceName)
-		}
+		continue
 	}
+
+	if exists && oldTime == lastUpdateTime {
+		continue
+	}
+
+	if addToWaitingQueue(task, targetPath) {
+		fmt.Printf("[%s] 📥 新增任务到等待队列：%s\n", getShanghaiTime(), task.ResourceName)
+	}
+}
 
 	saveSentTaskRecords()
 }
@@ -540,7 +541,8 @@ func executePush(targetPath string, tasks []Task) {
 		// 更新已发送记录
 		for _, task := range group.tasks {
 			sentTaskRecordsMu.Lock()
-			sentTaskRecords[task.ID.String()] = task.LastFileUpdateTime
+			lastUpdateTime, _ := task.LastFileUpdateTime.Int64()
+			sentTaskRecords[task.ID.String()] = lastUpdateTime
 			sentTaskRecordsMu.Unlock()
 		}
 		saveSentTaskRecords()
