@@ -12,7 +12,21 @@ const CONFIG = {
   persistFile: path.join(__dirname, 'data/sent-tasks.json')
 };
 
-const TIME_WINDOW_SECONDS = 120;
+// 时间窗口配置：电影路径30秒，其他路径120秒
+const TIME_WINDOW_MOVIE_SECONDS = 30;
+const TIME_WINDOW_DEFAULT_SECONDS = 120;
+
+// 判断路径是否为电影路径
+function isMoviePath(targetPath) {
+  if (!targetPath) return false;
+  const lowerPath = targetPath.toLowerCase();
+  return lowerPath.includes('电影') || lowerPath.includes('movie');
+}
+
+// 根据路径获取对应的时间窗口
+function getTimeWindowByPath(targetPath) {
+  return isMoviePath(targetPath) ? TIME_WINDOW_MOVIE_SECONDS : TIME_WINDOW_DEFAULT_SECONDS;
+}
 
 function getShanghaiTime() {
   const options = {
@@ -90,7 +104,9 @@ function checkRequiredEnv() {
 
 const waitingQueue = new Map();
 
-function chainGroupTasks(tasks) {
+function chainGroupTasks(tasks, targetPath) {
+  const timeWindow = getTimeWindowByPath(targetPath);
+  
   const sorted = [...tasks].sort((a, b) => 
     new Date(a.lastCheckTime) - new Date(b.lastCheckTime)
   );
@@ -105,7 +121,7 @@ function chainGroupTasks(tasks) {
       const lastCheckTime = new Date(lastTask.lastCheckTime).getTime();
       const timeDiff = checkTime - lastCheckTime;
       
-      if (timeDiff < TIME_WINDOW_SECONDS * 1000) {
+      if (timeDiff < timeWindow * 1000) {
         lastGroup.tasks.push(task);
         lastGroup.lastCheckTime = checkTime;
         continue;
@@ -123,7 +139,7 @@ function chainGroupTasks(tasks) {
 }
 
 async function executePush(targetPath, tasks) {
-  const groups = chainGroupTasks(tasks);
+  const groups = chainGroupTasks(tasks, targetPath);
   
   for (const group of groups) {
     const taskCount = group.tasks.length;
@@ -152,12 +168,16 @@ async function executePush(targetPath, tasks) {
 ├─ 推送路径：${targetPath}
 └─ 推送方式：单独推送`);
       } else {
-        const resourceNames = group.tasks.map(t => t.resourceName).join(',');
         const taskIds = group.tasks.map(t => t.id).join(',');
+        const resourceLines = group.tasks.map((t, i) => {
+          const prefix = i === group.tasks.length - 1 ? '│  └─' : '│  ├─';
+          return `${prefix} ${t.resourceName}`;
+        }).join('\n');
         console.log(`[${getShanghaiTime()}] ✅ 推送成功（合并推送）
 ├─ 合并任务数：${taskCount}个
 ├─ 任务ID列表：${taskIds}
-├─ 资源名称：${resourceNames}
+├─ 资源名称：
+${resourceLines}
 ├─ 推送路径：${targetPath}
 └─ 时间跨度：${Math.round((group.lastCheckTime - group.firstCheckTime) / 1000)}秒`);
       }
@@ -169,8 +189,10 @@ async function executePush(targetPath, tasks) {
   waitingQueue.delete(targetPath);
 }
 
-function canJoinChain(newTask, existingTasks) {
+function canJoinChain(newTask, existingTasks, targetPath) {
   if (existingTasks.length === 0) return true;
+  
+  const timeWindow = getTimeWindowByPath(targetPath);
   
   const sorted = [...existingTasks, newTask].sort((a, b) => 
     new Date(a.lastCheckTime) - new Date(b.lastCheckTime)
@@ -182,7 +204,7 @@ function canJoinChain(newTask, existingTasks) {
     const prevTask = sorted[newIndex - 1];
     const prevCheckTime = new Date(prevTask.lastCheckTime).getTime();
     const newCheckTime = new Date(newTask.lastCheckTime).getTime();
-    if (newCheckTime - prevCheckTime >= TIME_WINDOW_SECONDS * 1000) {
+    if (newCheckTime - prevCheckTime >= timeWindow * 1000) {
       return false;
     }
   }
@@ -191,7 +213,7 @@ function canJoinChain(newTask, existingTasks) {
     const nextTask = sorted[newIndex + 1];
     const nextCheckTime = new Date(nextTask.lastCheckTime).getTime();
     const newCheckTime = new Date(newTask.lastCheckTime).getTime();
-    if (nextCheckTime - newCheckTime >= TIME_WINDOW_SECONDS * 1000) {
+    if (nextCheckTime - newCheckTime >= timeWindow * 1000) {
       return false;
     }
   }
@@ -199,15 +221,17 @@ function canJoinChain(newTask, existingTasks) {
   return true;
 }
 
-// 判断是否过期（超过120秒）
-function isExpired(task) {
+// 判断是否过期
+function isExpired(task, targetPath) {
+  const timeWindow = getTimeWindowByPath(targetPath);
   const checkTime = new Date(task.lastCheckTime).getTime();
   const now = Date.now();
-  return (now - checkTime) >= TIME_WINDOW_SECONDS * 1000;
+  return (now - checkTime) >= timeWindow * 1000;
 }
 
 function addToWaitingQueue(task, targetPath) {
-  const expired = isExpired(task);
+  const timeWindow = getTimeWindowByPath(targetPath);
+  const expired = isExpired(task, targetPath);
   
   // 队列不存在
   if (!waitingQueue.has(targetPath)) {
@@ -218,7 +242,7 @@ function addToWaitingQueue(task, targetPath) {
       return true;
     }
     
-    // 新任务：创建队列，等待120秒
+    // 新任务：创建队列，等待对应时间窗口
     waitingQueue.set(targetPath, {
       tasks: [task],
       timer: setTimeout(async () => {
@@ -226,7 +250,7 @@ function addToWaitingQueue(task, targetPath) {
         if (currentQueue && currentQueue.tasks.length > 0) {
           await executePush(targetPath, currentQueue.tasks);
         }
-      }, TIME_WINDOW_SECONDS * 1000)
+      }, timeWindow * 1000)
     });
     return true;
   }
@@ -248,7 +272,7 @@ function addToWaitingQueue(task, targetPath) {
   }
   
   // 链式判断
-  if (!canJoinChain(task, queue.tasks)) {
+  if (!canJoinChain(task, queue.tasks, targetPath)) {
     console.log(`[${getShanghaiTime()}] 🔄 路径 ${targetPath} 新任务超出窗口，先推送现有任务`);
     
     clearTimeout(queue.timer);
@@ -261,7 +285,7 @@ function addToWaitingQueue(task, targetPath) {
         if (currentQueue && currentQueue.tasks.length > 0) {
           await executePush(targetPath, currentQueue.tasks);
         }
-      }, TIME_WINDOW_SECONDS * 1000)
+      }, timeWindow * 1000)
     });
     return true;
   }
@@ -320,15 +344,12 @@ async function runPolling() {
       }
       
       if (addToWaitingQueue(task, targetPath)) {
+        console.log(`[${getShanghaiTime()}] 📥 新增任务到等待队列：${task.resourceName}`);
         newTaskCount++;
       }
     }
     
     saveSentTaskRecords(sentTaskRecords);
-
-    if (newTaskCount > 0) {
-      console.log(`[${getShanghaiTime()}] 📥 新增 ${newTaskCount} 个任务到等待队列`);
-    }
 
   } catch (error) {
     console.error(`[${getShanghaiTime()}] ❌ 错误：${error.message}`);
@@ -338,7 +359,8 @@ async function runPolling() {
 checkRequiredEnv();
 console.log(`[${getShanghaiTime()}] 🚀 脚本启动成功
 ├─ 轮询间隔：${CONFIG.pollInterval}秒
-└─ 时间窗口：${TIME_WINDOW_SECONDS}秒（过期任务立即推送）`);
+├─ 电影路径时间窗口：${TIME_WINDOW_MOVIE_SECONDS}秒
+└─ 其他路径时间窗口：${TIME_WINDOW_DEFAULT_SECONDS}秒（过期任务立即推送）`);
 runPolling();
 setInterval(runPolling, CONFIG.pollInterval * 1000);
 
