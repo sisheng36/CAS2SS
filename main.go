@@ -25,12 +25,12 @@ type Config struct {
 
 // 任务结构
 type Task struct {
-	ID                 string `json:"id"`
-	ResourceName       string `json:"resourceName"`
-	RealFolderName     string `json:"realFolderName"`
-	Status             string `json:"status"`
-	LastCheckTime      string `json:"lastCheckTime"`
-	LastFileUpdateTime int64  `json:"lastFileUpdateTime"`
+	ID                 json.Number `json:"id"`
+	ResourceName       string      `json:"resourceName"`
+	RealFolderName     string      `json:"realFolderName"`
+	Status             string      `json:"status"`
+	LastCheckTime      string      `json:"lastCheckTime"`
+	LastFileUpdateTime int64       `json:"lastFileUpdateTime"`
 }
 
 // API响应结构
@@ -549,7 +549,7 @@ func executePush(targetPath string, tasks []Task) {
 		if taskCount == 1 {
 			task := group.tasks[0]
 			fmt.Printf("[%s] ✅ 推送成功\n", getShanghaiTime())
-			fmt.Printf("├─ 任务ID：%s\n", task.ID)
+			fmt.Printf("├─ 任务ID：%s\n", task.ID.String())
 			fmt.Printf("├─ 资源名称：%s\n", task.ResourceName)
 			fmt.Printf("├─ 推送路径：%s\n", targetPath)
 			fmt.Println("└─ 推送方式：单独推送")
