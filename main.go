@@ -30,7 +30,7 @@ type Task struct {
 	RealFolderName     string      `json:"realFolderName"`
 	Status             string      `json:"status"`
 	LastCheckTime      string      `json:"lastCheckTime"`
-	LastFileUpdateTime json.Number `json:"lastFileUpdateTime"`
+	LastFileUpdateTime string      `json:"lastFileUpdateTime"`
 }
 
 // API响应结构
@@ -63,7 +63,7 @@ type QueueItem struct {
 // 全局变量
 var (
 	config            Config
-	sentTaskRecords   = make(map[string]int64)
+	sentTaskRecords   = make(map[string]string)
 	sentTaskRecordsMu sync.RWMutex
 	waitingQueue      = make(map[string]*QueueItem)
 	waitingQueueMu    sync.Mutex
@@ -312,22 +312,21 @@ func runPolling() {
 
 for _, task := range filteredTasks {
 	targetPath := extractTargetPath(task.RealFolderName, task.ResourceName)
-	lastUpdateTime, _ := task.LastFileUpdateTime.Int64()
 
 	sentTaskRecordsMu.RLock()
 	oldTime, exists := sentTaskRecords[task.ID.String()]
 	sentTaskRecordsMu.RUnlock()
 
 	if targetPath == "" {
-		if !exists || oldTime != lastUpdateTime {
+		if !exists || oldTime != task.LastFileUpdateTime {
 			sentTaskRecordsMu.Lock()
-			sentTaskRecords[task.ID.String()] = lastUpdateTime
+			sentTaskRecords[task.ID.String()] = task.LastFileUpdateTime
 			sentTaskRecordsMu.Unlock()
 		}
 		continue
 	}
 
-	if exists && oldTime == lastUpdateTime {
+	if exists && oldTime == task.LastFileUpdateTime {
 		continue
 	}
 
@@ -542,7 +541,7 @@ func executePush(targetPath string, tasks []Task) {
 		for _, task := range group.tasks {
 			sentTaskRecordsMu.Lock()
 			lastUpdateTime, _ := task.LastFileUpdateTime.Int64()
-			sentTaskRecords[task.ID.String()] = lastUpdateTime
+			sentTaskRecords[task.ID.String()] = task.LastFileUpdateTime
 			sentTaskRecordsMu.Unlock()
 		}
 		saveSentTaskRecords()
