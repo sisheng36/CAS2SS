@@ -234,7 +234,7 @@ func initSentTaskRecords() {
 		data = []byte("{}")
 	}
 
-	var records map[string]string  
+	var records map[string]string
 	if err := json.Unmarshal(data, &records); err != nil {
 		fmt.Printf("[%s] ❌ 解析任务记录失败: %v\n", getShanghaiTime(), err)
 		os.WriteFile(config.PersistFile, []byte("{}"), 0644)
