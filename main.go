@@ -565,4 +565,10 @@ func executePush(targetPath string, tasks []Task) {
 			fmt.Println("├─ 资源名称：")
 			for i, t := range group.tasks {
 				if i == len(group.tasks)-1 {
-					fmt.Printf("│ 
+					fmt.Printf("│  └─ %s\n", t.ResourceName)
+				} else {
+					fmt.Printf("│  ├─ %s\n", t.ResourceName)
+				}
+			}
+			fmt.Printf("├─ 推送路径：%s\n", targetPath)
+			fmt.Printf("└─ 时间跨度：%d秒\n
