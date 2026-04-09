@@ -152,8 +152,8 @@ func checkRequiredEnv() {
 }
 
 func getShanghaiTime() string {
-	loc, _ := time.LoadLocation("Asia/Shanghai")
-	now := time.Now().In(loc)
+	// 上海时区 UTC+8，不依赖时区数据库
+	now := time.Now().UTC().Add(8 * time.Hour)
 	return now.Format("2006-01-02 15:04:05")
 }
 
