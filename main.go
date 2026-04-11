@@ -96,8 +96,12 @@ func main() {
 }
 
 func loadConfig() {
+	projectAPI := os.Getenv("PROJECT_API")
+	// 提前拼接路径
+	projectAPI = strings.TrimSuffix(projectAPI, "/") + "/api/tasks"
+
 	config = Config{
-		ProjectAPI:    os.Getenv("PROJECT_API"),
+		ProjectAPI:    projectAPI,       // 使用拼接后的地址
 		APIKey:        os.Getenv("API_KEY"),
 		TargetWebhook: os.Getenv("TARGET_WEBHOOK"),
 		PollInterval:  parseInt(os.Getenv("POLL_INTERVAL")),
