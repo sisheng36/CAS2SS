@@ -4,17 +4,17 @@ services:
     container_name: strm-push
     restart: unless-stopped
     environment:
-      - PROJECT_API=http://your-api-url
-      - API_KEY=your-api-key
-      - TARGET_WEBHOOK=http://your-webhook-url
-      - POLL_INTERVAL=10
-      - STRM_TASKS=task1,task2
-      - FILTER_STATUS=completed
+      - PROJECT_API=http://your-cas-url               #你的CAS地址，如http://127.0.0.1:3000
+      - API_KEY=your-api-key                          #你的CAS中生成的api-key
+      - TARGET_WEBHOOK=http://your-webhook-url        #你的SS中的webhook地址
+      - POLL_INTERVAL=10                              #监听CAS的频率，默认为每10s监听一次
+      - STRM_TASKS=task1,task2                        #你的SS中用于生成strm任务的任务名，多个任务名之际用“,”隔开
+      - FILTER_STATUS=processing                      #默认仅监听追剧中的项目
       - TZ=Asia/Shanghai
     volumes:
-      - ./data:/app/data
+      - ./data:/app/data                              #数据本地化，防止重启程序时反复发送通知及用以对比订阅更新
     logging:
       driver: "json-file"
       options:
-        max-size: "10m"
-        max-file: "3"
+        max-size: "10m"                               #每个日志最多占用空间
+        max-file: "3"                                 #最多保留旧日志数目
