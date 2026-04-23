@@ -1,6 +1,5 @@
 services:
   strm-push:
-    build: .
     container_name: strm-push
     restart: unless-stopped
     environment:
