@@ -1,6 +1,6 @@
 services:
-  strm-push:
-    container_name: strm-push
+  cas2ss:
+    container_name: cas2ss
     restart: unless-stopped
     environment:
       - PROJECT_API=http://your-cas-url               #你的CAS地址，如http://127.0.0.1:3000
