@@ -1,7 +1,9 @@
 services:
   cas2ss:
     container_name: cas2ss
+    image: sisheng36/cas2ss:latest
     restart: unless-stopped
+    network_mode: bridge
     environment:
       - PROJECT_API=http://your-cas-url               #你的CAS地址，如http://127.0.0.1:3000
       - API_KEY=your-api-key                          #你的CAS中生成的api-key
