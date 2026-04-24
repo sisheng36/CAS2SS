@@ -212,7 +212,7 @@ func extractTargetPath(realFolderName, resourceName string) string {
 		return ""
 	}
 
-	targetParts := filteredParts[:resourceIndex]
+	targetParts := filteredParts[:resourceIndex+1]
 	if len(targetParts) > 0 {
 		return "/" + strings.Join(targetParts, "/")
 	}
