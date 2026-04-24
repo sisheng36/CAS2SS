@@ -182,11 +182,9 @@ func extractTargetPath(realFolderName, resourceName string) string {
 	}
 
 	cleanPath := strings.Trim(realFolderName, " /")
-	cleanPath = strings.ToLower(cleanPath)
 
 	cleanResource := strings.Trim(resourceName, " ")
 	cleanResource = strings.TrimSuffix(cleanResource, "(根)")
-	cleanResource = strings.ToLower(cleanResource)
 
 	pathParts := strings.Split(cleanPath, "/")
 	var filteredParts []string
