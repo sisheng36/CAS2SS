@@ -299,7 +299,7 @@ func runPolling() {
 
 	var filteredTasks []Task
 	for _, task := range apiResp.Data {
-		if task.Status == config.FilterStatus && task.RealFolderName != "" {
+		if task.RealFolderName != "" {
 			filteredTasks = append(filteredTasks, task)
 		}
 	}
