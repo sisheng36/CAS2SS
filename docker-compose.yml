@@ -23,7 +23,6 @@ type Config struct {
 	ProjectAPI    string   // 项目接口地址（已拼接 /api/tasks）
 	APIKey        string   // API 密钥
 	TargetWebhook string   // 推送目标 webhook
-	PollInterval  int      // 原轮询间隔（保留，新流程不再使用）
 	StrmTasks     []string // strm 任务列表
 	PersistFile   string   // 已发送任务记录文件路径
 	ListenAddr    string   // webhook 监听地址
@@ -159,7 +158,6 @@ func loadConfig() {
 		ProjectAPI:    projectAPI,
 		APIKey:        os.Getenv("API_KEY"),
 		TargetWebhook: os.Getenv("TARGET_WEBHOOK"),
-		PollInterval:  parseInt(os.Getenv("POLL_INTERVAL"), 30), // 原轮询间隔，保留但不影响逻辑
 		PersistFile:   filepath.Join(getExeDir(), "data", "sent-tasks.json"),
 		ListenAddr:    getEnvOrDefault("WEBHOOK_LISTEN_ADDR", defaultListenAddr),
 	}
@@ -168,18 +166,6 @@ func loadConfig() {
 	if strmTasks := os.Getenv("STRM_TASKS"); strmTasks != "" {
 		config.StrmTasks = strings.Split(strmTasks, ",")
 	}
-}
-
-// parseInt 将字符串转为整数，失败时返回默认值
-func parseInt(s string, defaultVal int) int {
-	if s == "" {
-		return defaultVal
-	}
-	var result int
-	if _, err := fmt.Sscanf(s, "%d", &result); err != nil {
-		return defaultVal
-	}
-	return result
 }
 
 // getEnvOrDefault 获取环境变量，若不存在则返回默认值
