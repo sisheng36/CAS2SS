@@ -1,4 +1,4 @@
-# cas2ss — CAS 任务更新自动推送到 Strm Service
+# cas2ss — CAS 任务更新自动推送到 SmartStrm
 生成时间：2026-05-08 12:51:33
 
 本项目是一个轻量级的中间件，负责监听 Webhook 触发，自动从 CAS 拉取最新的文件更新任务，并按路径聚合后推送到 SmartStrm (SS) 的 Webhook，实现自动化拨剧/更新 strm 文件。
