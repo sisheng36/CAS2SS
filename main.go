@@ -1,29 +1,38 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
-// 配置结构
+// ---------- 配置 ----------
+
+// Config 存放所有环境变量配置
 type Config struct {
-	ProjectAPI    string
-	APIKey        string
-	TargetWebhook string
-	PollInterval  int
-	StrmTasks     []string
-	FilterStatus  string
-	PersistFile   string
+	ProjectAPI    string   // 项目接口地址（已拼接 /api/tasks）
+	APIKey        string   // API 密钥
+	TargetWebhook string   // 推送目标 webhook
+	PollInterval  int      // 原轮询间隔（保留，新流程不再使用）
+	StrmTasks     []string // strm 任务列表
+	FilterStatus  []string // 需要处理的任务状态（逗号分隔）
+	PersistFile   string   // 已发送任务记录文件路径
+	ListenAddr    string   // webhook 监听地址
 }
 
-// 任务结构
+// ---------- 数据结构 ----------
+
+// Task 表示 API 返回的任务信息
 type Task struct {
 	ID                 json.Number `json:"id"`
 	ResourceName       string      `json:"resourceName"`
@@ -33,94 +42,161 @@ type Task struct {
 	LastFileUpdateTime string      `json:"lastFileUpdateTime"`
 }
 
-// API响应结构
+// APIResponse 接口返回结构
 type APIResponse struct {
 	Success bool   `json:"success"`
 	Data    []Task `json:"data"`
 }
 
-// 推送数据结构
+// PushData 推送 webhook 的负载结构
 type PushData struct {
 	StrmTask string `json:"strmtask"`
 	Event    string `json:"event"`
 	SavePath string `json:"savepath"`
 }
 
-// 任务组
+// TaskGroup 任务聚合组，时间连续的若干个任务
 type TaskGroup struct {
 	tasks          []Task
 	firstCheckTime time.Time
 	lastCheckTime  time.Time
 }
 
-// 等待队列项
+// QueueItem 等待队列项，包含任务列表与聚合定时器
 type QueueItem struct {
 	tasks []Task
 	timer *time.Timer
 	mu    sync.Mutex
 }
 
-// 全局变量
+// ---------- 全局变量 ----------
+
 var (
-	config            Config
+	config Config
+
+	// 已推送任务记录（id -> lastFileUpdateTime）
 	sentTaskRecords   = make(map[string]string)
 	sentTaskRecordsMu sync.RWMutex
-	waitingQueue      = make(map[string]*QueueItem)
-	waitingQueueMu    sync.Mutex
-	lastNoTaskLogAt   time.Time
+
+	// 等待队列（按目标路径分组）
+	waitingQueue   = make(map[string]*QueueItem)
+	waitingQueueMu sync.Mutex
+
+	// 防抖调度相关
+	scheduleMu      sync.Mutex
+	lastReceiveTime time.Time // 最后一次收到 webhook 的时间
+	debounceTimer   *time.Timer
+	pending         bool // 当前是否有未处理的调度请求
+	running         bool // runPolling 是否正在执行
+	exiting         bool // 是否进入退出流程
+
+	// 用于等待 runPolling 结束（优雅退出）
+	runCond = sync.NewCond(&scheduleMu)
+
+	// HTTP 服务器实例
+	httpServer *http.Server
+
+	// 日志无任务去重时间
+	lastNoTaskLogAt time.Time
+
+	// 防抖定时时长
+	debounceDuration = 10 * time.Second
 )
+
+// ---------- 常量 ----------
 
 const (
-	timeWindowMovieSeconds   = 30
-	timeWindowDefaultSeconds = 120
+	timeWindowMovieSeconds   = 30  // 电影路径时间窗口
+	timeWindowDefaultSeconds = 120 // 其他路径时间窗口
 	noTaskLogInterval        = 60 * time.Second
+	defaultListenAddr        = ":1234"
 )
 
+// ---------- 主流程 ----------
+
 func main() {
+	// 1. 初始化配置
 	loadConfig()
 	checkRequiredEnv()
 	initSentTaskRecords()
 
 	fmt.Printf("[%s] 🚀 脚本启动成功\n", getShanghaiTime())
-	fmt.Printf("├─ 轮询间隔：%d秒\n", config.PollInterval)
+	fmt.Printf("├─ Webhook 监听地址：%s\n", config.ListenAddr)
+	fmt.Printf("├─ 防抖时间：%s\n", debounceDuration)
 	fmt.Printf("├─ 电影路径时间窗口：%d秒\n", timeWindowMovieSeconds)
-	fmt.Printf("└─ 其他路径时间窗口：%d秒（过期任务立即推送）\n", timeWindowDefaultSeconds)
+	fmt.Printf("└─ 其他路径时间窗口：%d秒\n", timeWindowDefaultSeconds)
 
-	runPolling()
-	ticker := time.NewTicker(time.Duration(config.PollInterval) * time.Second)
-	defer ticker.Stop()
-
-	for range ticker.C {
-		runPolling()
+	// 2. 启动 HTTP 服务
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", webhookHandler) // 捕获所有路径
+	httpServer = &http.Server{
+		Addr:    config.ListenAddr,
+		Handler: mux,
 	}
+
+	go func() {
+		fmt.Printf("[%s] 🌐 HTTP 服务已启动，等待 webhook...\n", getShanghaiTime())
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			fmt.Printf("[%s] ❌ HTTP 服务异常: %v\n", getShanghaiTime(), err)
+			os.Exit(1)
+		}
+	}()
+
+	// 3. 监听退出信号
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	<-sigCh
+
+	// 4. 优雅退出
+	gracefulShutdown()
 }
+
+// ---------- 配置加载与校验 ----------
 
 func loadConfig() {
-	projectAPI := os.Getenv("PROJECT_API")
-	// 提前拼接路径
-	projectAPI = strings.TrimSuffix(projectAPI, "/") + "/api/tasks"
+	projectAPI := strings.TrimSuffix(os.Getenv("PROJECT_API"), "/") + "/api/tasks"
 
 	config = Config{
-		ProjectAPI:    projectAPI,       // 使用拼接后的地址
+		ProjectAPI:    projectAPI,
 		APIKey:        os.Getenv("API_KEY"),
 		TargetWebhook: os.Getenv("TARGET_WEBHOOK"),
-		PollInterval:  parseInt(os.Getenv("POLL_INTERVAL")),
-		FilterStatus:  os.Getenv("FILTER_STATUS"),
+		PollInterval:  parseInt(os.Getenv("POLL_INTERVAL"), 30), // 原轮询间隔，保留但不影响逻辑
 		PersistFile:   filepath.Join(getExeDir(), "data", "sent-tasks.json"),
+		ListenAddr:    getEnvOrDefault("WEBHOOK_LISTEN_ADDR", defaultListenAddr),
 	}
 
-	strmTasks := os.Getenv("STRM_TASKS")
-	if strmTasks != "" {
+	// 解析 strm 任务列表
+	if strmTasks := os.Getenv("STRM_TASKS"); strmTasks != "" {
 		config.StrmTasks = strings.Split(strmTasks, ",")
+	}
+
+	// 解析需要过滤的任务状态
+	if statusFilter := os.Getenv("FILTER_STATUS"); statusFilter != "" {
+		config.FilterStatus = strings.Split(statusFilter, ",")
 	}
 }
 
-func parseInt(s string) int {
+// parseInt 将字符串转为整数，失败时返回默认值
+func parseInt(s string, defaultVal int) int {
+	if s == "" {
+		return defaultVal
+	}
 	var result int
-	fmt.Sscanf(s, "%d", &result)
+	if _, err := fmt.Sscanf(s, "%d", &result); err != nil {
+		return defaultVal
+	}
 	return result
 }
 
+// getEnvOrDefault 获取环境变量，若不存在则返回默认值
+func getEnvOrDefault(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultVal
+}
+
+// getExeDir 获取可执行文件所在目录
 func getExeDir() string {
 	exe, err := os.Executable()
 	if err != nil {
@@ -129,23 +205,21 @@ func getExeDir() string {
 	return filepath.Dir(exe)
 }
 
+// checkRequiredEnv 检查必填环境变量
 func checkRequiredEnv() {
 	required := map[string]string{
 		"PROJECT_API":    config.ProjectAPI,
 		"API_KEY":        config.APIKey,
 		"TARGET_WEBHOOK": config.TargetWebhook,
 		"STRM_TASKS":     strings.Join(config.StrmTasks, ","),
-		"FILTER_STATUS":  config.FilterStatus,
-		"POLL_INTERVAL":  fmt.Sprintf("%d", config.PollInterval),
+		"FILTER_STATUS":  strings.Join(config.FilterStatus, ","),
 	}
-
 	var missing []string
 	for key, value := range required {
 		if value == "" {
 			missing = append(missing, key)
 		}
 	}
-
 	if len(missing) > 0 {
 		fmt.Printf("[%s] ❌ 缺少必填环境变量：\n", getShanghaiTime())
 		for _, key := range missing {
@@ -155,18 +229,61 @@ func checkRequiredEnv() {
 	}
 }
 
+// getShanghaiTime 返回当前上海时区格式化时间 (UTC+8)
 func getShanghaiTime() string {
-	// 上海时区 UTC+8，不依赖时区数据库
-	now := time.Now().UTC().Add(8 * time.Hour)
-	return now.Format("2006-01-02 15:04:05")
+	return time.Now().UTC().Add(8 * time.Hour).Format("2006-01-02 15:04:05")
 }
 
-func isMoviePath(targetPath string) bool {
-	if targetPath == "" {
-		return false
+// ---------- 已发送记录持久化 ----------
+
+func initSentTaskRecords() {
+	dataDir := filepath.Dir(config.PersistFile)
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		fmt.Printf("[%s] ❌ 创建数据目录失败: %v\n", getShanghaiTime(), err)
+		return
 	}
-	lowerPath := strings.ToLower(targetPath)
-	return strings.Contains(lowerPath, "电影") || strings.Contains(lowerPath, "movie")
+	data, err := os.ReadFile(config.PersistFile)
+	if err != nil {
+		if os.IsNotExist(err) {
+			os.WriteFile(config.PersistFile, []byte("{}"), 0644)
+		}
+		return
+	}
+	if len(data) == 0 {
+		data = []byte("{}")
+	}
+	var records map[string]string
+	if err := json.Unmarshal(data, &records); err != nil {
+		fmt.Printf("[%s] ❌ 解析已发送任务记录失败: %v\n", getShanghaiTime(), err)
+		os.WriteFile(config.PersistFile, []byte("{}"), 0644)
+		return
+	}
+	sentTaskRecords = records
+}
+
+func saveSentTaskRecords() {
+	sentTaskRecordsMu.RLock()
+	// 深拷贝，避免序列化时 map 被其他协程修改
+	recordsCopy := make(map[string]string, len(sentTaskRecords))
+	for k, v := range sentTaskRecords {
+		recordsCopy[k] = v
+	}
+	sentTaskRecordsMu.RUnlock()
+
+	data, err := json.MarshalIndent(recordsCopy, "", "  ")
+	if err != nil {
+		fmt.Printf("[%s] ❌ 序列化任务记录失败: %v\n", getShanghaiTime(), err)
+		return
+	}
+	os.WriteFile(config.PersistFile, data, 0644)
+}
+
+// ---------- 路径与时间窗口判断 ----------
+
+// isMoviePath 判断路径是否属于电影类（用于时间窗口区分）
+func isMoviePath(targetPath string) bool {
+	lower := strings.ToLower(targetPath)
+	return strings.Contains(lower, "电影") || strings.Contains(lower, "movie")
 }
 
 func getTimeWindowByPath(targetPath string) int {
@@ -176,90 +293,141 @@ func getTimeWindowByPath(targetPath string) int {
 	return timeWindowDefaultSeconds
 }
 
+// extractTargetPath 从文件夹和资源名称中提取目标路径
 func extractTargetPath(realFolderName, resourceName string) string {
 	if realFolderName == "" || resourceName == "" {
 		return ""
 	}
-
 	cleanPath := strings.Trim(realFolderName, " /")
-
 	cleanResource := strings.Trim(resourceName, " ")
 	cleanResource = strings.TrimSuffix(cleanResource, "(根)")
 
-	pathParts := strings.Split(cleanPath, "/")
-	var filteredParts []string
-	for _, part := range pathParts {
-		if strings.Trim(part, " ") != "" {
-			filteredParts = append(filteredParts, part)
+	parts := strings.Split(cleanPath, "/")
+	var filtered []string
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			filtered = append(filtered, trimmed)
 		}
 	}
-
-	if len(filteredParts) == 0 {
+	if len(filtered) == 0 {
 		return ""
 	}
 
-	resourceIndex := -1
-	for i, part := range filteredParts {
+	// 找到资源名称所在位置
+	idx := -1
+	for i, part := range filtered {
 		if strings.Contains(part, cleanResource) {
-			resourceIndex = i
+			idx = i
 			break
 		}
 	}
-
-	if resourceIndex == -1 {
+	if idx == -1 {
 		return ""
 	}
-
-	targetParts := filteredParts[:resourceIndex+1]
-	if len(targetParts) > 0 {
-		return "/" + strings.Join(targetParts, "/")
-	}
-	return ""
+	targetParts := filtered[:idx+1]
+	return "/" + strings.Join(targetParts, "/")
 }
 
-func initSentTaskRecords() {
-	dataDir := filepath.Dir(config.PersistFile)
-	if err := os.MkdirAll(dataDir, 0755); err != nil {
-		fmt.Printf("[%s] ❌ 创建数据目录失败: %v\n", getShanghaiTime(), err)
+// ---------- GitHub webhook 触发与防抖调度 ----------
+
+// webhookHandler 处理所有 HTTP 请求，触发防抖调度
+func webhookHandler(w http.ResponseWriter, r *http.Request) {
+	// 忽略请求体
+	io.Copy(io.Discard, r.Body)
+	r.Body.Close()
+
+	// 进入防抖调度
+	scheduleRun()
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("ok"))
+}
+
+// scheduleRun 防抖入口：记录接收时间，重置或新建定时器
+func scheduleRun() {
+	scheduleMu.Lock()
+	defer scheduleMu.Unlock()
+
+	// 如果正在退出，不再响应新请求
+	if exiting {
 		return
 	}
 
-	data, err := os.ReadFile(config.PersistFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			os.WriteFile(config.PersistFile, []byte("{}"), 0644)
+	now := time.Now()
+	lastReceiveTime = now
+
+	// 如果 runPolling 正在执行，标记 pending，不操作定时器
+	if running {
+		pending = true
+		return
+	}
+
+	// 重置或启动防抖定时器
+	if debounceTimer != nil {
+		debounceTimer.Reset(debounceDuration)
+	} else {
+		debounceTimer = time.AfterFunc(debounceDuration, executeAfterDebounce)
+	}
+}
+
+// executeAfterDebounce 防抖定时器到期后调用
+func executeAfterDebounce() {
+	scheduleMu.Lock()
+	defer scheduleMu.Unlock()
+
+	if exiting {
+		return
+	}
+
+	// 若已经在执行，标记 pending（极少情况，但安全处理）
+	if running {
+		pending = true
+		return
+	}
+
+	// 开始执行 runPolling
+	startRunPolling()
+}
+
+// startRunPolling 真正启动 runPolling，并更新 running 状态
+func startRunPolling() {
+	running = true
+	// 在单独 goroutine 中执行，避免阻塞调度锁
+	go func() {
+		defer onRunPollingDone()
+		runPolling()
+	}()
+}
+
+// onRunPollingDone runPolling 执行完毕后的清理与后续调度
+func onRunPollingDone() {
+	scheduleMu.Lock()
+	defer scheduleMu.Unlock()
+
+	running = false
+	// 唤醒可能等待退出的协程
+	runCond.Broadcast()
+
+	if exiting {
+		return
+	}
+
+	if pending {
+		pending = false
+		// 计算距离最后一次接收时间 10 秒后的剩余时间
+		delay := lastReceiveTime.Add(debounceDuration).Sub(time.Now())
+		if delay < 0 {
+			delay = 0
 		}
-		return
+		debounceTimer = time.AfterFunc(delay, executeAfterDebounce)
+	} else {
+		debounceTimer = nil
 	}
-
-	if len(data) == 0 {
-		data = []byte("{}")
-	}
-
-	var records map[string]string
-	if err := json.Unmarshal(data, &records); err != nil {
-		fmt.Printf("[%s] ❌ 解析任务记录失败: %v\n", getShanghaiTime(), err)
-		os.WriteFile(config.PersistFile, []byte("{}"), 0644)
-		return
-	}
-
-	sentTaskRecords = records
 }
 
-func saveSentTaskRecords() {
-	sentTaskRecordsMu.RLock()
-	data, err := json.MarshalIndent(sentTaskRecords, "", "  ")
-	sentTaskRecordsMu.RUnlock()
-
-	if err != nil {
-		fmt.Printf("[%s] ❌ 序列化任务记录失败: %v\n", getShanghaiTime(), err)
-		return
-	}
-
-	os.WriteFile(config.PersistFile, data, 0644)
-}
+// ---------- 核心任务获取与处理 ----------
 
 func runPolling() {
+	// 1. 请求 API 获取任务列表
 	req, err := http.NewRequest("GET", config.ProjectAPI, nil)
 	if err != nil {
 		fmt.Printf("[%s] ❌ 创建请求失败: %v\n", getShanghaiTime(), err)
@@ -288,57 +456,80 @@ func runPolling() {
 	}
 
 	if !apiResp.Success || len(apiResp.Data) == 0 {
+		// 无任务日志去重
 		if time.Since(lastNoTaskLogAt) >= noTaskLogInterval {
 			fmt.Printf("[%s] ⏳ 暂无新任务\n", getShanghaiTime())
 			lastNoTaskLogAt = time.Now()
 		}
 		return
 	}
+	lastNoTaskLogAt = time.Time{} // 有任务时重置，下次无任务可正常打印
 
-	lastNoTaskLogAt = time.Time{}
-
+	// 2. 状态过滤 & 基础校验
 	var filteredTasks []Task
 	for _, task := range apiResp.Data {
-		if task.RealFolderName != "" {
-			filteredTasks = append(filteredTasks, task)
+		// 必须包含 RealFolderName
+		if task.RealFolderName == "" {
+			continue
 		}
+		// 状态过滤（如果配置了 FilterStatus）
+		if len(config.FilterStatus) > 0 {
+			statusMatch := false
+			for _, s := range config.FilterStatus {
+				if task.Status == s {
+					statusMatch = true
+					break
+				}
+			}
+			if !statusMatch {
+				continue
+			}
+		}
+		filteredTasks = append(filteredTasks, task)
 	}
 
 	if len(filteredTasks) == 0 {
 		if time.Since(lastNoTaskLogAt) >= noTaskLogInterval {
-			fmt.Printf("[%s] ⏳ 暂无新任务\n", getShanghaiTime())
+			fmt.Printf("[%s] ⏳ 暂无符合条件的新任务\n", getShanghaiTime())
 			lastNoTaskLogAt = time.Now()
 		}
 		return
 	}
 
-for _, task := range filteredTasks {
-	targetPath := extractTargetPath(task.RealFolderName, task.ResourceName)
+	// 3. 去重检查与路径提取
+	for _, task := range filteredTasks {
+		targetPath := extractTargetPath(task.RealFolderName, task.ResourceName)
 
-	sentTaskRecordsMu.RLock()
-	oldTime, exists := sentTaskRecords[task.ID.String()]
-	sentTaskRecordsMu.RUnlock()
+		sentTaskRecordsMu.RLock()
+		oldTime, exists := sentTaskRecords[task.ID.String()]
+		sentTaskRecordsMu.RUnlock()
 
-	if targetPath == "" {
-		if !exists || oldTime != task.LastFileUpdateTime {
-			sentTaskRecordsMu.Lock()
-			sentTaskRecords[task.ID.String()] = task.LastFileUpdateTime
-			sentTaskRecordsMu.Unlock()
+		// 无法提取路径的任务，只更新记录不推送
+		if targetPath == "" {
+			if !exists || oldTime != task.LastFileUpdateTime {
+				sentTaskRecordsMu.Lock()
+				sentTaskRecords[task.ID.String()] = task.LastFileUpdateTime
+				sentTaskRecordsMu.Unlock()
+			}
+			continue
 		}
-		continue
+
+		// 已存在且文件更新时间未改变，跳过
+		if exists && oldTime == task.LastFileUpdateTime {
+			continue
+		}
+
+		// 加入等待队列
+		if addToWaitingQueue(task, targetPath) {
+			fmt.Printf("[%s] 📥 新增任务到等待队列：%s\n", getShanghaiTime(), task.ResourceName)
+		}
 	}
 
-	if exists && oldTime == task.LastFileUpdateTime {
-		continue
-	}
-
-	if addToWaitingQueue(task, targetPath) {
-		fmt.Printf("[%s] 📥 新增任务到等待队列：%s\n", getShanghaiTime(), task.ResourceName)
-	}
-}
-
+	// 持久化已发送记录
 	saveSentTaskRecords()
 }
+
+// ---------- 等待队列与聚合逻辑 ----------
 
 func addToWaitingQueue(task Task, targetPath string) bool {
 	timeWindow := getTimeWindowByPath(targetPath)
@@ -349,14 +540,13 @@ func addToWaitingQueue(task Task, targetPath string) bool {
 
 	// 队列不存在
 	if _, exists := waitingQueue[targetPath]; !exists {
-		// 过期任务：立即推送
 		if expired {
+			// 已过期任务立即推送
 			fmt.Printf("[%s] ⚡ 检测到过期任务，立即推送\n", getShanghaiTime())
 			go executePush(targetPath, []Task{task})
 			return true
 		}
-
-		// 新任务：创建队列
+		// 新建队列并设置聚合定时器
 		item := &QueueItem{
 			tasks: []Task{task},
 		}
@@ -376,14 +566,14 @@ func addToWaitingQueue(task Task, targetPath string) bool {
 	queue.mu.Lock()
 	defer queue.mu.Unlock()
 
-	// 任务已在队列中
+	// 任务是否已在队列中
 	for _, t := range queue.tasks {
 		if t.ID.String() == task.ID.String() {
 			return false
 		}
 	}
 
-	// 过期任务：立即推送整个队列
+	// 新任务已过期，立即推送现有队列
 	if expired {
 		fmt.Printf("[%s] ⚡ 检测到过期任务，立即推送队列\n", getShanghaiTime())
 		queue.timer.Stop()
@@ -393,13 +583,13 @@ func addToWaitingQueue(task Task, targetPath string) bool {
 		return true
 	}
 
-	// 链式判断
+	// 检查新任务能否与现有任务形成连续时间链
 	if !canJoinChain(task, queue.tasks, targetPath) {
 		fmt.Printf("[%s] 🔄 路径 %s 新任务超出窗口，先推送现有任务\n", getShanghaiTime(), targetPath)
-
+		// 停止原定时器，推送现有队列（拷贝），重置队列
 		queue.timer.Stop()
 		go executePush(targetPath, append([]Task{}, queue.tasks...))
-
+		// 将新任务放入新队列
 		queue.tasks = []Task{task}
 		queue.timer = time.AfterFunc(time.Duration(timeWindow)*time.Second, func() {
 			waitingQueueMu.Lock()
@@ -412,134 +602,124 @@ func addToWaitingQueue(task Task, targetPath string) bool {
 		return true
 	}
 
-	// 加入队列
+	// 正常加入队列
 	queue.tasks = append(queue.tasks, task)
 	return true
 }
 
+// isExpired 检查任务是否已过期（超过对应时间窗口）
 func isExpired(task Task, targetPath string) bool {
 	timeWindow := getTimeWindowByPath(targetPath)
 	checkTime, err := time.Parse(time.RFC3339, task.LastCheckTime)
 	if err != nil {
+		// 解析失败按当前时间计算，保守处理
 		checkTime = time.Now()
 	}
 	return time.Since(checkTime) >= time.Duration(timeWindow)*time.Second
 }
 
+// canJoinChain 判断新任务是否能与现有任务保持连续时间链
 func canJoinChain(newTask Task, existingTasks []Task, targetPath string) bool {
 	if len(existingTasks) == 0 {
 		return true
 	}
-
 	timeWindow := getTimeWindowByPath(targetPath)
-	allTasks := append(existingTasks, newTask)
+	// 将所有任务（现有 + 新）按时间排序
+	all := append(append([]Task{}, existingTasks...), newTask)
+	sortTasksByTime(all)
 
-	// 按时间排序
-	sortTasksByTime(allTasks)
-
-	newIndex := -1
-	for i, t := range allTasks {
+	// 找到新任务在排序后列表中的位置
+	newIdx := -1
+	for i, t := range all {
 		if t.ID.String() == newTask.ID.String() {
-			newIndex = i
+			newIdx = i
 			break
 		}
 	}
-
 	newCheckTime, _ := time.Parse(time.RFC3339, newTask.LastCheckTime)
 
 	// 检查与前一个任务的时间差
-	if newIndex > 0 {
-		prevTask := allTasks[newIndex-1]
-		prevCheckTime, _ := time.Parse(time.RFC3339, prevTask.LastCheckTime)
-		if newCheckTime.Sub(prevCheckTime) >= time.Duration(timeWindow)*time.Second {
+	if newIdx > 0 {
+		prev := all[newIdx-1]
+		prevTime, _ := time.Parse(time.RFC3339, prev.LastCheckTime)
+		if newCheckTime.Sub(prevTime) >= time.Duration(timeWindow)*time.Second {
 			return false
 		}
 	}
-
 	// 检查与后一个任务的时间差
-	if newIndex < len(allTasks)-1 {
-		nextTask := allTasks[newIndex+1]
-		nextCheckTime, _ := time.Parse(time.RFC3339, nextTask.LastCheckTime)
-		if nextCheckTime.Sub(newCheckTime) >= time.Duration(timeWindow)*time.Second {
+	if newIdx < len(all)-1 {
+		next := all[newIdx+1]
+		nextTime, _ := time.Parse(time.RFC3339, next.LastCheckTime)
+		if nextTime.Sub(newCheckTime) >= time.Duration(timeWindow)*time.Second {
 			return false
 		}
 	}
-
 	return true
 }
 
+// sortTasksByTime 按 LastCheckTime 排序（使用标准库）
 func sortTasksByTime(tasks []Task) {
-	for i := 0; i < len(tasks)-1; i++ {
-		for j := i + 1; j < len(tasks); j++ {
-			time1, _ := time.Parse(time.RFC3339, tasks[i].LastCheckTime)
-			time2, _ := time.Parse(time.RFC3339, tasks[j].LastCheckTime)
-			if time2.Before(time1) {
-				tasks[i], tasks[j] = tasks[j], tasks[i]
-			}
-		}
-	}
+	sort.Slice(tasks, func(i, j int) bool {
+		t1, _ := time.Parse(time.RFC3339, tasks[i].LastCheckTime)
+		t2, _ := time.Parse(time.RFC3339, tasks[j].LastCheckTime)
+		return t1.Before(t2)
+	})
 }
 
+// chainGroupTasks 将任务按时间连续性分割成多个推送组
 func chainGroupTasks(tasks []Task, targetPath string) []TaskGroup {
 	timeWindow := getTimeWindowByPath(targetPath)
-
-	sortedTasks := make([]Task, len(tasks))
-	copy(sortedTasks, tasks)
-	sortTasksByTime(sortedTasks)
+	sorted := make([]Task, len(tasks))
+	copy(sorted, tasks)
+	sortTasksByTime(sorted)
 
 	var groups []TaskGroup
-
-	for _, task := range sortedTasks {
-		checkTime, _ := time.Parse(time.RFC3339, task.LastCheckTime)
-
+	for _, t := range sorted {
+		checkTime, _ := time.Parse(time.RFC3339, t.LastCheckTime)
 		if len(groups) > 0 {
-			lastGroup := &groups[len(groups)-1]
-			timeDiff := checkTime.Sub(lastGroup.lastCheckTime)
-
-			if timeDiff < time.Duration(timeWindow)*time.Second {
-				lastGroup.tasks = append(lastGroup.tasks, task)
-				lastGroup.lastCheckTime = checkTime
+			last := &groups[len(groups)-1]
+			if checkTime.Sub(last.lastCheckTime) < time.Duration(timeWindow)*time.Second {
+				last.tasks = append(last.tasks, t)
+				last.lastCheckTime = checkTime
 				continue
 			}
 		}
-
 		groups = append(groups, TaskGroup{
-			tasks:          []Task{task},
+			tasks:          []Task{t},
 			firstCheckTime: checkTime,
 			lastCheckTime:  checkTime,
 		})
 	}
-
 	return groups
 }
 
+// ---------- 推送执行 ----------
+
 func executePush(targetPath string, tasks []Task) {
+	// 按时间连续性分组合并
 	groups := chainGroupTasks(tasks, targetPath)
 
 	for _, group := range groups {
 		taskCount := len(group.tasks)
-
+		// 构造推送数据
 		pushData := PushData{
 			StrmTask: strings.Join(config.StrmTasks, ","),
 			Event:    "cs_strm",
 			SavePath: targetPath,
 		}
-
 		jsonData, _ := json.Marshal(pushData)
 
 		req, _ := http.NewRequest("POST", config.TargetWebhook, strings.NewReader(string(jsonData)))
 		req.Header.Set("Content-Type", "application/json; charset=utf-8")
-
 		client := &http.Client{Timeout: 30 * time.Second}
 		resp, err := client.Do(req)
-
 		if err != nil {
 			fmt.Printf("[%s] ❌ 推送失败 [%s]: %v\n", getShanghaiTime(), targetPath, err)
 			continue
 		}
 		resp.Body.Close()
 
-		// 更新已发送记录
+		// 推送成功，更新已发送记录
 		for _, task := range group.tasks {
 			sentTaskRecordsMu.Lock()
 			sentTaskRecords[task.ID.String()] = task.LastFileUpdateTime
@@ -547,7 +727,7 @@ func executePush(targetPath string, tasks []Task) {
 		}
 		saveSentTaskRecords()
 
-		// 输出日志
+		// 输出推送日志
 		if taskCount == 1 {
 			task := group.tasks[0]
 			fmt.Printf("[%s] ✅ 推送成功\n", getShanghaiTime())
@@ -556,29 +736,64 @@ func executePush(targetPath string, tasks []Task) {
 			fmt.Printf("├─ 推送路径：%s\n", targetPath)
 			fmt.Println("└─ 推送方式：单独推送")
 		} else {
-			taskIds := make([]string, len(group.tasks))
+			ids := make([]string, taskCount)
 			for i, t := range group.tasks {
-				taskIds[i] = t.ID.String()
+				ids[i] = t.ID.String()
 			}
-
 			fmt.Printf("[%s] ✅ 推送成功（合并推送）\n", getShanghaiTime())
 			fmt.Printf("├─ 合并任务数：%d个\n", taskCount)
-			fmt.Printf("├─ 任务ID列表：%s\n", strings.Join(taskIds, ","))
+			fmt.Printf("├─ 任务ID列表：%s\n", strings.Join(ids, ","))
 			fmt.Println("├─ 资源名称：")
 			for i, t := range group.tasks {
-				if i == len(group.tasks)-1 {
-					fmt.Printf("│  └─ %s\n", t.ResourceName)
-				} else {
-					fmt.Printf("│  ├─ %s\n", t.ResourceName)
+				prefix := "│  ├─"
+				if i == taskCount-1 {
+					prefix = "│  └─"
 				}
+				fmt.Printf("%s %s\n", prefix, t.ResourceName)
 			}
 			fmt.Printf("├─ 推送路径：%s\n", targetPath)
 			timeSpan := group.lastCheckTime.Sub(group.firstCheckTime).Seconds()
 			fmt.Printf("└─ 时间跨度：%d秒\n", int(timeSpan))
 		}
 	}
-	// 删除队列
+
+	// 推送完毕，删除等待队列中的该条目
 	waitingQueueMu.Lock()
 	delete(waitingQueue, targetPath)
 	waitingQueueMu.Unlock()
+}
+
+// ---------- 优雅退出 ----------
+
+func gracefulShutdown() {
+	fmt.Printf("[%s] ⏳ 收到退出信号，开始优雅关闭...\n", getShanghaiTime())
+
+	// 1. 关闭 HTTP 服务
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		fmt.Printf("[%s] ⚠️ HTTP 服务关闭异常: %v\n", getShanghaiTime(), err)
+	} else {
+		fmt.Printf("[%s] 🛑 HTTP 服务已停止\n", getShanghaiTime())
+	}
+
+	// 2. 停止接受新调度，等待正在执行的 runPolling 完成
+	scheduleMu.Lock()
+	exiting = true
+	if debounceTimer != nil {
+		debounceTimer.Stop()
+		debounceTimer = nil
+	}
+	// 等待 running 变为 false
+	for running {
+		runCond.Wait()
+	}
+	scheduleMu.Unlock()
+
+	// 3. 持久化已发送记录
+	fmt.Printf("[%s] 💾 保存已发送任务记录...\n", getShanghaiTime())
+	saveSentTaskRecords()
+
+	fmt.Printf("[%s] 👋 程序退出\n", getShanghaiTime())
+	os.Exit(0)
 }
