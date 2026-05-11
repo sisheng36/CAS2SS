@@ -94,8 +94,8 @@ docker-compose up -d
 ├─ 合并任务数：2个
 ├─ 任务ID列表：12,15
 ├─ 资源名称：
-│  ├─ The OutCast
-│  └─ AnotherShow
+│  ├─ The OutCast/Season 05
+│  └─ The OutCast/Season 06
 ├─ 推送路径：/更新中/The OutCast
 └─ 时间跨度：15秒
 ```
